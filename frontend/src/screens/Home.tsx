@@ -52,11 +52,33 @@ function StepCard({
   );
 }
 
+const NICKNAME_STORAGE_KEY = 'sketchsabotage:nickname';
+
+function loadStoredNickname(): string {
+  try {
+    return localStorage.getItem(NICKNAME_STORAGE_KEY) ?? '';
+  } catch {
+    // Private browsing / storage disabled — just start blank, not fatal.
+    return '';
+  }
+}
+
 export function Home() {
   const { status, createRoom, joinRoom, lastError, clearError } = useGame();
-  const [nickname, setNickname] = useState('');
+  // Remembered from last time, but still just the input's starting value —
+  // the player can freely change it here.
+  const [nickname, setNickname] = useState(loadStoredNickname);
   const [mode, setMode] = useState<'none' | 'join'>('none');
   const [code, setCode] = useState('');
+
+  function updateNickname(value: string) {
+    setNickname(value);
+    try {
+      localStorage.setItem(NICKNAME_STORAGE_KEY, value);
+    } catch {
+      // Same as above — persistence is a nice-to-have, not required to play.
+    }
+  }
 
   // A Lobby invite link is `<origin>?code=XXXXX` — jump straight to the
   // Join form with the code prefilled instead of making someone type a
@@ -125,7 +147,7 @@ export function Home() {
             <div className="mt-6 flex max-w-[400px] flex-col gap-3.5">
               <input
                 value={nickname}
-                onChange={(e) => setNickname(e.target.value)}
+                onChange={(e) => updateNickname(e.target.value)}
                 placeholder="Your nickname"
                 maxLength={20}
                 className="w-full rounded-full bg-panel-2 px-5 py-3 text-center font-bold text-white outline-none focus:ring-2 focus:ring-accent"
