@@ -19,8 +19,14 @@ const (
 	totalRoundsDefault = 3 // one "round" = every player draws once
 	wordChoicesCount   = 3
 
-	chooseDuration   = 10 * time.Second
-	drawTurnDuration = 80 * time.Second
+	chooseDuration = 10 * time.Second
+
+	// A full game (all rounds, all players) targets roughly this long —
+	// see computeDrawDuration. More players means more turns, so each
+	// turn's drawing time shrinks to compensate, clamped to stay playable.
+	targetGameDuration = 10 * time.Minute
+	minDrawDuration    = 30 * time.Second
+	maxDrawDuration    = 80 * time.Second
 
 	// Scoring: faster correct guesses score more; the drawer scores per
 	// correct guesser, rewarding a drawing people can actually read.
@@ -62,6 +68,7 @@ type Room struct {
 	turnOrder      []string
 	turnsCompleted int
 	totalTurns     int
+	drawDuration   time.Duration // computed once in Start(), see computeDrawDuration
 
 	word            string   // secret — never put in State, only sent privately to the drawer
 	wordChoices     []string // the 3 candidates offered to the current drawer
@@ -229,12 +236,31 @@ func (r *Room) Start(requesterID string) error {
 	copy(order, r.order)
 	r.turnOrder = order
 	r.totalTurns = totalRoundsDefault * len(order)
+	r.drawDuration = computeDrawDuration(r.totalTurns)
 	r.turnsCompleted = 0
 	r.scores = make(map[string]int, len(order))
 	r.mu.Unlock()
 
 	r.beginChoosing()
 	return nil
+}
+
+// computeDrawDuration scales each turn's drawing time so a full game lands
+// close to targetGameDuration regardless of player count.
+func computeDrawDuration(totalTurns int) time.Duration {
+	if totalTurns == 0 {
+		return maxDrawDuration
+	}
+	budget := targetGameDuration - time.Duration(totalTurns)*chooseDuration
+	per := budget / time.Duration(totalTurns)
+	switch {
+	case per < minDrawDuration:
+		return minDrawDuration
+	case per > maxDrawDuration:
+		return maxDrawDuration
+	default:
+		return per
+	}
 }
 
 func (r *Room) cancelTimerLocked() {
@@ -340,8 +366,8 @@ func (r *Room) startDrawingWithWord(word string) {
 	r.cancelTimerLocked()
 	r.phase = PhaseDrawing
 	r.word = word
-	r.phaseEndsAt = time.Now().Add(drawTurnDuration)
-	r.timer = time.AfterFunc(drawTurnDuration, r.endTurn)
+	r.phaseEndsAt = time.Now().Add(r.drawDuration)
+	r.timer = time.AfterFunc(r.drawDuration, r.endTurn)
 	r.mu.Unlock()
 
 	r.fireNotify()
@@ -379,15 +405,16 @@ func (r *Room) TrySubmitGuess(playerID, text string) GuessOutcome {
 	r.correctGuessers[playerID] = true
 	r.guessOrder = append(r.guessOrder, playerID)
 
+	position := len(r.guessOrder)
+	points := guessPointsForPosition(position)
+	r.scores[playerID] += points
+	r.scores[r.currentDrawerIDLocked()] += pointsForDrawerPerGuesser
+
 	nickname := "unknown"
 	if p, ok := r.players[playerID]; ok {
 		nickname = p.Nickname
 	}
-	r.addSystemMessageLocked(fmt.Sprintf("%s guessed the word!", nickname))
-
-	position := len(r.guessOrder)
-	r.scores[playerID] += guessPointsForPosition(position)
-	r.scores[r.currentDrawerIDLocked()] += pointsForDrawerPerGuesser
+	r.addSystemMessageLocked(fmt.Sprintf("%s guessed the word! (+%d)", nickname, points))
 
 	eligible := len(r.turnOrder) - 1 // everyone except the drawer
 	allGuessed := eligible > 0 && len(r.correctGuessers) >= eligible
@@ -462,6 +489,7 @@ func (r *Room) PlayAgain(requesterID string) error {
 	r.turnOrder = nil
 	r.turnsCompleted = 0
 	r.totalTurns = 0
+	r.drawDuration = 0
 	r.word = ""
 	r.wordChoices = nil
 	r.correctGuessers = nil

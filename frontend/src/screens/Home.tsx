@@ -337,8 +337,8 @@ export function Home() {
               </svg>
             </span>
           }
-          title="90s"
-          subtitle="Per turn"
+          title="~10 min"
+          subtitle="Total game length"
         />
         <Stat
           icon={

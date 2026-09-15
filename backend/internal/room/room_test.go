@@ -1,6 +1,9 @@
 package room
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 // This drives the state machine directly (calling begin*/after* methods
 // instead of waiting out real timers) — the timing behavior itself is
@@ -16,6 +19,10 @@ func TestFullGameRotatesTurnsAndReachesScoreboard(t *testing.T) {
 	r.turnOrder = order
 	r.totalTurns = 2 * len(order) // 2 rounds x 2 players = 4 turns
 	r.turnsCompleted = 0
+	// Bypassing Start() means drawDuration defaults to 0, which would arm a
+	// real near-instant timer racing with this test's explicit
+	// AdvanceTurnEarly() calls — set it long enough to never fire here.
+	r.drawDuration = time.Hour
 	r.scores = make(map[string]int)
 
 	for turn := 0; turn < 4; turn++ {
@@ -91,6 +98,23 @@ func TestFullGameRotatesTurnsAndReachesScoreboard(t *testing.T) {
 	for _, s := range state.Scores {
 		if s.Score != 0 {
 			t.Fatalf("expected scores reset to 0 after PlayAgain, got %s=%d", s.Nickname, s.Score)
+		}
+	}
+}
+
+func TestComputeDrawDurationTargetsATenMinuteGame(t *testing.T) {
+	cases := []struct {
+		totalTurns int
+		want       time.Duration
+	}{
+		{totalTurns: 6, want: maxDrawDuration},  // 2 players x 3 rounds: budget/turn (90s) clamps down to the 80s max
+		{totalTurns: 8, want: 65 * time.Second}, // exact fit, no clamping: (600-80)/8 = 65s
+		{totalTurns: 18, want: minDrawDuration}, // 6 players x 3 rounds: budget/turn (~23s) clamps up to the 30s min
+	}
+	for _, c := range cases {
+		got := computeDrawDuration(c.totalTurns)
+		if got != c.want {
+			t.Errorf("computeDrawDuration(%d) = %v, want %v", c.totalTurns, got, c.want)
 		}
 	}
 }

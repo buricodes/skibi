@@ -55,21 +55,31 @@ mechanism a real Skribbl-style game actually needs.
    word…". If the drawer doesn't choose in time, the server picks one for
    them automatically — a turn can never stall waiting on a distracted
    drawer.
-3. **Drawing** (80s) — the drawer draws live; every stroke is broadcast to
-   everyone else in the room as it's drawn (not a single submitted image at
-   the end — genuinely real-time, stroke by stroke). Guessers see the
-   canvas updating live, plus a word-length hint ("_ _ _ _ _ _") and can
-   type guesses in the same chat box used for regular chat. A correct
-   guess is never shown as the literal chat text (that would spoil it for
-   anyone still guessing) — it's replaced with a system announcement
-   ("Riya guessed the word!") visible to everyone, and that player is
-   locked out of guessing again this turn. A wrong guess is shown as
-   ordinary chat, exactly like real Skribbl. The turn ends the instant
-   every eligible guesser (everyone except the drawer) has guessed
-   correctly, or the timer runs out — whichever comes first.
+3. **Drawing** (30–80s, scaled — see below) — the drawer draws live; every
+   stroke is broadcast to everyone else in the room as it's drawn (not a
+   single submitted image at the end — genuinely real-time, stroke by
+   stroke). Guessers see the canvas updating live, plus a word-length hint
+   ("_ _ _ _ _ _") and can type guesses in the same chat box used for
+   regular chat. A correct guess is never shown as the literal chat text
+   (that would spoil it for anyone still guessing) — it's replaced with a
+   system announcement naming the points earned ("Riya guessed the word!
+   (+3)") visible to everyone, and that player is locked out of guessing
+   again this turn. A wrong guess is shown as ordinary chat, exactly like
+   real Skribbl. The turn ends the instant every eligible guesser (everyone
+   except the drawer) has guessed correctly, or the timer runs out —
+   whichever comes first.
 4. Turn passes to the next player in turn order, looping back to
    **Choosing**. Once every player has drawn **3** times (3 full rounds,
    configurable), the game moves to **Scoreboard**.
+
+**Total game length targets ~10 minutes**, regardless of player count.
+More players means more turns (`3 rounds × player count`), so each turn's
+Drawing duration is computed once at game start to fit that budget —
+clamped between 30s and 80s so it never gets so short it's unplayable, or
+so long a big lobby's game drags well past 10 minutes anyway. A 2-player
+game lands at the 80s max (its budget-per-turn is roomier than that); a
+6-player game clamps down to the 30s min. See `computeDrawDuration` in
+`backend/internal/room/room.go`.
 5. **Scoreboard** — final standings, crown for the winner. Host can hit
    "Play Again" to reset the same room (same players, scores/turns
    cleared) back to Lobby, no re-joining needed.
