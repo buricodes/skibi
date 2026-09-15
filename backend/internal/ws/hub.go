@@ -61,8 +61,9 @@ func (h *Hub) BroadcastExcept(roomCode string, exclude *Client, data []byte) {
 
 // SendToPlayer writes data to just the one connection in roomCode whose
 // PlayerID matches — used for messages that must stay private to one
-// player, like a Sabotage assignment (never a room broadcast). A room of
-// up to 10 players makes the linear scan a non-issue.
+// player, like the current drawer's word choices or confirmed word (never
+// a room broadcast). A room of up to 10 players makes the linear scan a
+// non-issue.
 func (h *Hub) SendToPlayer(roomCode, playerID string, data []byte) {
 	h.mu.Lock()
 	defer h.mu.Unlock()

@@ -2,17 +2,6 @@ import { useEffect, useState } from 'react';
 import { Doodle } from '@/components/Doodle';
 import { useGame } from '@/state/GameContext';
 
-function Logo({ size = 38 }: { size?: number }) {
-  return (
-    <div className="font-display font-extrabold leading-none tracking-tight" style={{ fontSize: size }}>
-      Tom
-      <span className="bg-gradient-to-r from-[#c084fc] via-[#8b5cf6] to-[#a78bfa] bg-clip-text text-transparent">
-        Sheint
-      </span>
-    </div>
-  );
-}
-
 function Stat({ icon, title, subtitle }: { icon: React.ReactNode; title: string; subtitle: string }) {
   return (
     <div className="flex items-center gap-4">
@@ -68,7 +57,6 @@ export function Home() {
   const [nickname, setNickname] = useState('');
   const [mode, setMode] = useState<'none' | 'join'>('none');
   const [code, setCode] = useState('');
-  const [showHelp, setShowHelp] = useState(false);
 
   // A Lobby invite link is `<origin>?code=XXXXX` — jump straight to the
   // Join form with the code prefilled instead of making someone type a
@@ -101,33 +89,6 @@ export function Home() {
 
   return (
     <div className="relative z-1 mx-auto max-w-[1240px] px-6 py-6">
-      <div className="flex items-start justify-between gap-5 pb-5">
-        <div>
-          <Logo />
-          <div className="mt-0.5 font-display text-lg font-semibold">
-            Draw. Guess. <span className="text-blue">Have Fun!</span>
-          </div>
-        </div>
-        <button
-          onClick={() => setShowHelp((v) => !v)}
-          className="flex items-center gap-2.5 rounded-full bg-panel-2 px-4 py-2.5 text-sm font-extrabold"
-        >
-          How to Play
-          <span className="flex h-6 w-6 items-center justify-center rounded-full bg-[#1b2a6b] text-xs font-extrabold text-[#9aa4d4]">
-            ?
-          </span>
-        </button>
-      </div>
-
-      {showHelp && (
-        <div className="mb-4 rounded-2xl bg-panel-3 px-4.5 py-4 text-sm leading-relaxed text-[#c9d0f0]">
-          <b className="text-white">How to play.</b> Join a room, then take turns: one player picks a
-          secret word and draws it live while everyone else watches and guesses in chat. Guess first
-          for the most points — the drawer scores for every correct guess. Turns rotate through
-          everyone; highest total after all rounds wins.
-        </div>
-      )}
-
       <div className="relative overflow-hidden rounded-[22px] bg-[#0a0f2e] px-9 pb-10 pt-9">
         <div className="relative grid grid-cols-1 items-center gap-8 lg:grid-cols-[minmax(300px,1fr)_minmax(0,470px)]">
           <div className="min-w-0">
