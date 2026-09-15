@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Doodle } from '@/components/Doodle';
+import { unlockAudio } from '@/lib/sounds';
 import { useGame } from '@/state/GameContext';
 
 function Stat({ icon, title, subtitle }: { icon: React.ReactNode; title: string; subtitle: string }) {
@@ -98,6 +99,7 @@ export function Home() {
 
   function handleCreate() {
     if (!canPlay) return;
+    unlockAudio(); // real click — the safe place to unlock audio for later, async-triggered sounds
     clearError();
     createRoom(nickname.trim());
   }
@@ -105,6 +107,7 @@ export function Home() {
   function handleJoin(e: React.FormEvent) {
     e.preventDefault();
     if (!canPlay || code.trim().length === 0) return;
+    unlockAudio();
     clearError();
     joinRoom(code.trim().toUpperCase(), nickname.trim());
   }

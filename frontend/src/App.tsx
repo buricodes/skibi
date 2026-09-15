@@ -1,5 +1,6 @@
 import { GameProvider, useGame } from '@/state/GameContext';
 import { Backdrop } from '@/components/Backdrop';
+import { SoundToggle } from '@/components/SoundToggle';
 import { Home } from '@/screens/Home';
 import { Lobby } from '@/screens/Lobby';
 import { Draw } from '@/screens/Draw';
@@ -29,6 +30,7 @@ function App() {
   return (
     <GameProvider>
       <Backdrop />
+      <SoundToggle />
       <Router />
     </GameProvider>
   );

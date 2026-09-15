@@ -1,11 +1,28 @@
+import { useEffect, useRef } from 'react';
 import { useCountdown } from '@/lib/useCountdown';
+import { playTick } from '@/lib/sounds';
 import { useGame } from '@/state/GameContext';
+
+const LOW_TIME_THRESHOLD_SECONDS = 5;
 
 export function GameHeader({ phaseLabel }: { phaseLabel: string }) {
   const { room } = useGame();
   const remainingMs = useCountdown(room?.phaseEndsAt);
   const seconds = Math.ceil(remainingMs / 1000);
   const timerText = `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
+
+  // One tick as the timer crosses the low-time threshold, not a tick every
+  // second — reset whenever a new phase timer starts.
+  const tickedRef = useRef(false);
+  useEffect(() => {
+    tickedRef.current = false;
+  }, [room?.phaseEndsAt]);
+  useEffect(() => {
+    if (seconds === LOW_TIME_THRESHOLD_SECONDS && !tickedRef.current) {
+      tickedRef.current = true;
+      playTick();
+    }
+  }, [seconds]);
 
   if (!room) return null;
 

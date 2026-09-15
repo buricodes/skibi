@@ -2,6 +2,7 @@ import { createContext, useContext, useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import { socket } from '@/lib/socket';
 import type { ConnectionStatus } from '@/lib/socket';
+import { playCorrectGuess, playGameOver, playTurnEnd, playYourTurn } from '@/lib/sounds';
 import {
   TYPE_CANVAS_CLEAR,
   TYPE_CHAT_SEND,
@@ -66,6 +67,49 @@ export function GameProvider({ children }: { children: ReactNode }) {
     if (room?.phase !== 'choosing') setWordChoices(null);
     if (room?.phase !== 'drawing') setYourWord(null);
   }, [room?.phase]);
+
+  // wordChoices only ever arrives via the private word:choices message, so
+  // going from null -> an array here means "it's your turn to draw."
+  useEffect(() => {
+    if (wordChoices) playYourTurn();
+  }, [wordChoices]);
+
+  // Game-over fanfare, once, on the actual lobby->...->scoreboard transition
+  // rather than every scoreboard-phase re-render (Play Again -> a later
+  // game reaching scoreboard again should still play it, so this compares
+  // against the previous phase rather than just checking equality once).
+  const prevPhaseRef = useRef<RoomState['phase'] | undefined>(undefined);
+  useEffect(() => {
+    if (room?.phase === 'scoreboard' && prevPhaseRef.current !== 'scoreboard') {
+      playGameOver();
+    }
+    prevPhaseRef.current = room?.phase;
+  }, [room?.phase]);
+
+  // Chat carries both real messages and system announcements (see
+  // ChatMessage.system) — new system entries drive the correct-guess/
+  // turn-end cues. Baseline starts at null so reconnecting into a room
+  // with existing history doesn't replay every past sound at once.
+  const chatBaselineRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (!room) {
+      chatBaselineRef.current = null;
+      return;
+    }
+    if (chatBaselineRef.current === null) {
+      chatBaselineRef.current = room.chat.length;
+      return;
+    }
+    if (room.chat.length <= chatBaselineRef.current) return;
+
+    const newMessages = room.chat.slice(chatBaselineRef.current);
+    chatBaselineRef.current = room.chat.length;
+    for (const m of newMessages) {
+      if (!m.system) continue;
+      if (m.text.includes('guessed the word')) playCorrectGuess();
+      else if (m.text.startsWith("Time's up!")) playTurnEnd();
+    }
+  }, [room?.chat]);
 
   useEffect(() => {
     if (!connected.current) {
