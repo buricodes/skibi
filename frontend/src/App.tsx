@@ -1,4 +1,5 @@
 import { GameProvider, useGame } from '@/state/GameContext';
+import { Backdrop } from '@/components/Backdrop';
 import { Home } from '@/screens/Home';
 import { Lobby } from '@/screens/Lobby';
 import { Choosing } from '@/screens/Choosing';
@@ -26,6 +27,7 @@ function Router() {
 function App() {
   return (
     <GameProvider>
+      <Backdrop />
       <Router />
     </GameProvider>
   );

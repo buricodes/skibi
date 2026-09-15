@@ -14,6 +14,11 @@ interface Stroke {
 
 export interface CanvasHandle {
   clear: () => void;
+  // Local-only for now — pops the drawer's own last stroke but doesn't
+  // tell viewers, so their canvas won't match until the next stroke draws
+  // over it. Wiring a stroke:undo relay is the natural next step; this is
+  // UI-only for now, per the design pass.
+  undo: () => void;
   applyRemoteStrokeStart: (s: { x: number; y: number; color: string; size: number }) => void;
   applyRemoteStrokePoint: (p: { x: number; y: number }) => void;
   applyRemoteStrokeEnd: () => void;
@@ -22,17 +27,18 @@ export interface CanvasHandle {
 
 interface CanvasProps {
   // false for a guesser's read-only view, which only ever gets driven by
-  // applyRemote* calls (see GameContext.onRemoteStroke) and never accepts
-  // pointer input or shows the color/size palette.
+  // applyRemote* calls and never accepts pointer input.
   interactive?: boolean;
+  // Color/size are controlled by the parent's toolbar (see screens/Draw.tsx)
+  // rather than owned here, so the toolbar UI can live in its own card.
+  color: string;
+  size: number;
   onStrokeStart?: (s: { x: number; y: number; color: string; size: number }) => void;
   onStrokePoint?: (p: { x: number; y: number }) => void;
   onStrokeEnd?: () => void;
   onClear?: () => void;
 }
 
-const COLORS = ['#0b0d14', '#ef4444', '#f59e0b', '#22c55e', '#3b82f6', '#ffffff'];
-const SIZES = [3, 6, 12];
 const CANVAS_WIDTH = 480;
 const CANVAS_HEIGHT = 360;
 
@@ -41,20 +47,19 @@ const CANVAS_HEIGHT = 360;
 // displayed via CSS — that's what makes raw stroke coordinates portable
 // between the drawer and every viewer without any extra normalization.
 export const Canvas = forwardRef<CanvasHandle, CanvasProps>(function Canvas(
-  { interactive = true, onStrokeStart, onStrokePoint, onStrokeEnd, onClear },
+  { interactive = true, color, size, onStrokeStart, onStrokePoint, onStrokeEnd, onClear },
   ref,
 ) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const activeStrokeRef = useRef<Stroke | null>(null);
   const [strokes, setStrokes] = useState<Stroke[]>([]);
-  const [color, setColor] = useState(COLORS[0]);
-  const [size, setSize] = useState(SIZES[1]);
 
   useImperativeHandle(ref, () => ({
     clear: () => {
       setStrokes([]);
       onClear?.();
     },
+    undo: () => setStrokes((s) => s.slice(0, -1)),
     applyRemoteStrokeStart: (s) => {
       activeStrokeRef.current = { color: s.color, size: s.size, points: [{ x: s.x, y: s.y }] };
       setStrokes((prev) => [...prev, activeStrokeRef.current!]);
@@ -144,57 +149,17 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(function Canvas(
     onStrokeEnd?.();
   }
 
-  function handleClear() {
-    setStrokes([]);
-    onClear?.();
-  }
-
   return (
-    <div className="flex w-full flex-col gap-2">
-      <canvas
-        ref={canvasRef}
-        width={CANVAS_WIDTH}
-        height={CANVAS_HEIGHT}
-        onPointerDown={handlePointerDown}
-        onPointerMove={handlePointerMove}
-        onPointerUp={handlePointerUp}
-        onPointerLeave={handlePointerUp}
-        className={`w-full rounded-lg border border-border bg-white ${interactive ? 'touch-none' : ''}`}
-        style={{ aspectRatio: `${CANVAS_WIDTH} / ${CANVAS_HEIGHT}` }}
-      />
-      {interactive && (
-        <div className="flex flex-wrap items-center gap-2">
-          {COLORS.map((c) => (
-            <button
-              key={c}
-              type="button"
-              onClick={() => setColor(c)}
-              className={`h-6 w-6 rounded-full border-2 ${color === c ? 'border-accent' : 'border-white/10'}`}
-              style={{ background: c }}
-              aria-label={`color ${c}`}
-            />
-          ))}
-          <div className="mx-1 h-5 w-px bg-border" />
-          {SIZES.map((s) => (
-            <button
-              key={s}
-              type="button"
-              onClick={() => setSize(s)}
-              className={`flex h-6 w-6 items-center justify-center rounded-full border ${size === s ? 'border-accent' : 'border-border'}`}
-            >
-              <span className="rounded-full bg-white/80" style={{ width: s, height: s }} />
-            </button>
-          ))}
-          <div className="mx-1 h-5 w-px bg-border" />
-          <button
-            type="button"
-            onClick={handleClear}
-            className="rounded-md border border-border px-2 py-1 text-xs text-white/70 hover:border-accent"
-          >
-            Clear
-          </button>
-        </div>
-      )}
-    </div>
+    <canvas
+      ref={canvasRef}
+      width={CANVAS_WIDTH}
+      height={CANVAS_HEIGHT}
+      onPointerDown={handlePointerDown}
+      onPointerMove={handlePointerMove}
+      onPointerUp={handlePointerUp}
+      onPointerLeave={handlePointerUp}
+      className={`block w-full rounded-lg bg-white ${interactive ? 'touch-none cursor-crosshair' : ''}`}
+      style={{ aspectRatio: `${CANVAS_WIDTH} / ${CANVAS_HEIGHT}` }}
+    />
   );
 });
