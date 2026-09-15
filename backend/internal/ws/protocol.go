@@ -3,8 +3,7 @@ package ws
 import "encoding/json"
 
 // Envelope is the one message shape every client<->server message uses:
-// { "type": "...", "payload": {...} }. See BUILD_PLAN.md §2 for the full
-// event contract this implements.
+// { "type": "...", "payload": {...} }.
 type Envelope struct {
 	Type    string          `json:"type"`
 	Payload json.RawMessage `json:"payload"`
@@ -20,17 +19,18 @@ func Encode(msgType string, payload any) ([]byte, error) {
 	return json.Marshal(Envelope{Type: msgType, Payload: p})
 }
 
-// Message types, matching BUILD_PLAN.md's event contract table.
 const (
 	// Client -> Server
-	TypeRoomCreate     = "room:create"
-	TypeRoomJoin       = "room:join"
-	TypeRoomStart      = "room:start"
-	TypeRoomPlayAgain  = "room:playAgain"
-	TypeChatSend       = "chat:send"
-	TypeDrawSubmit     = "draw:submit"
-	TypeSabotageSubmit = "sabotage:submit"
-	TypeGuessVote      = "guess:vote"
+	TypeRoomCreate    = "room:create"
+	TypeRoomJoin      = "room:join"
+	TypeRoomStart     = "room:start"
+	TypeRoomPlayAgain = "room:playAgain"
+	TypeChatSend      = "chat:send"
+	TypeWordChoose    = "word:choose"
+	TypeStrokeStart   = "stroke:start"
+	TypeStrokePoint   = "stroke:point"
+	TypeStrokeEnd     = "stroke:end"
+	TypeCanvasClear   = "canvas:clear"
 
 	// Server -> Client (room broadcasts)
 	TypeRoomState   = "room:state"
@@ -42,10 +42,12 @@ const (
 	// are otherwise meaningless random ids to the browser.
 	TypeSelfInfo = "self:info"
 
-	// Server -> Client (direct to one connection, not broadcast) — the
-	// assigned saboteur's private task for this round. Never sent to anyone
-	// else, since it's the answer to the Guess phase.
-	TypeSabotageAssignment = "sabotage:assignment"
+	// Server -> Client (direct to the current drawer only, not broadcast) —
+	// the 3 word options to choose from, then the confirmed word once
+	// chosen (including when auto-picked by timeout). Never sent to anyone
+	// else, since it's the answer to what everyone else is guessing.
+	TypeWordChoices = "word:choices"
+	TypeYourWord    = "word:yours"
 )
 
 type RoomCreatePayload struct {
@@ -61,24 +63,32 @@ type ChatSendPayload struct {
 	Text string `json:"text"`
 }
 
-type DrawSubmitPayload struct {
-	ImageDataURL string `json:"imageDataUrl"`
+type WordChoosePayload struct {
+	Word string `json:"word"`
 }
 
-type SabotageSubmitPayload struct {
-	ImageDataURL string `json:"imageDataUrl"`
+type WordChoicesPayload struct {
+	Choices []string `json:"choices"`
 }
 
-type GuessVotePayload struct {
-	TargetArtistID string `json:"targetArtistId"`
-	SuspectID      string `json:"suspectId"`
+type YourWordPayload struct {
+	Word string `json:"word"`
 }
 
-type SabotageAssignmentPayload struct {
-	TargetArtistID   string `json:"targetArtistId"`
-	TargetNickname   string `json:"targetNickname"`
-	OriginalImageURL string `json:"originalImageDataUrl"`
-	Prompt           string `json:"prompt"`
+// Stroke*/CanvasClear payloads are never decoded server-side — the server
+// only checks that the sender is the current drawer, then re-broadcasts
+// the envelope byte-for-byte to everyone else in the room. These structs
+// exist purely so the frontend has a typed contract to match against.
+type StrokeStartPayload struct {
+	X     float64 `json:"x"`
+	Y     float64 `json:"y"`
+	Color string  `json:"color"`
+	Size  float64 `json:"size"`
+}
+
+type StrokePointPayload struct {
+	X float64 `json:"x"`
+	Y float64 `json:"y"`
 }
 
 type ErrorPayload struct {

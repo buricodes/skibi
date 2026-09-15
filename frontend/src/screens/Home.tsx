@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useGame } from '@/state/GameContext';
 
 export function Home() {
@@ -6,6 +6,20 @@ export function Home() {
   const [nickname, setNickname] = useState('');
   const [mode, setMode] = useState<'none' | 'join'>('none');
   const [code, setCode] = useState('');
+
+  // A Lobby invite link is `<origin>?code=XXXXX` — jump straight to the
+  // Join form with the code prefilled instead of making someone type a
+  // 5-character code by hand.
+  useEffect(() => {
+    const url = new URL(window.location.href);
+    const invited = url.searchParams.get('code');
+    if (invited) {
+      setCode(invited.toUpperCase());
+      setMode('join');
+      url.searchParams.delete('code');
+      window.history.replaceState({}, '', url);
+    }
+  }, []);
 
   const canPlay = status === 'open' && nickname.trim().length > 0;
 

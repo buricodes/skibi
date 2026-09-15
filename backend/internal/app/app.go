@@ -1,6 +1,6 @@
 // Package app wires the generic ws transport (Hub/Client) to the
-// game-specific room logic. This is where BUILD_PLAN.md's socket event
-// contract actually gets implemented, one handler per message type.
+// game-specific room logic — this is where the socket event contract
+// actually gets implemented, one handler per message type.
 package app
 
 import (
@@ -37,12 +37,10 @@ func (a *App) HandleMessage(c *ws.Client, env ws.Envelope) {
 		a.handleRoomPlayAgain(c, env)
 	case ws.TypeChatSend:
 		a.handleChatSend(c, env)
-	case ws.TypeDrawSubmit:
-		a.handleDrawSubmit(c, env)
-	case ws.TypeSabotageSubmit:
-		a.handleSabotageSubmit(c, env)
-	case ws.TypeGuessVote:
-		a.handleGuessVote(c, env)
+	case ws.TypeWordChoose:
+		a.handleWordChoose(c, env)
+	case ws.TypeStrokeStart, ws.TypeStrokePoint, ws.TypeStrokeEnd, ws.TypeCanvasClear:
+		a.handleDrawerRelay(c, env)
 	default:
 		a.sendError(c, "unknown_type", "unrecognized message type: "+env.Type)
 	}
@@ -72,7 +70,8 @@ func (a *App) handleRoomCreate(c *ws.Client, env ws.Envelope) {
 
 	r := a.manager.CreateRoom(c.ID, p.Nickname)
 	r.SetNotifier(func() { a.broadcastState(r) })
-	r.SetOnEnterSabotage(func() { a.sendSabotageAssignments(r) })
+	r.SetOnEnterChoosing(func() { a.sendWordChoices(r) })
+	r.SetOnEnterDrawing(func() { a.sendYourWord(r) })
 	c.RoomCode = r.Code
 	c.PlayerID = c.ID
 	a.hub.Join(r.Code, c)
@@ -136,102 +135,46 @@ func (a *App) handleRoomPlayAgain(c *ws.Client, _ ws.Envelope) {
 	}
 }
 
-func (a *App) handleDrawSubmit(c *ws.Client, env ws.Envelope) {
+func (a *App) handleWordChoose(c *ws.Client, env ws.Envelope) {
 	if c.RoomCode == "" {
 		a.sendError(c, "not_in_room", "join a room first")
 		return
 	}
-	var p ws.DrawSubmitPayload
-	if err := json.Unmarshal(env.Payload, &p); err != nil || p.ImageDataURL == "" {
-		a.sendError(c, "bad_request", "imageDataUrl is required")
+	var p ws.WordChoosePayload
+	if err := json.Unmarshal(env.Payload, &p); err != nil || p.Word == "" {
+		a.sendError(c, "bad_request", "word is required")
 		return
 	}
 	r, ok := a.manager.GetRoom(c.RoomCode)
 	if !ok {
 		return
 	}
+	if err := r.ChooseWord(c.PlayerID, p.Word); err != nil {
+		a.sendError(c, "choose_failed", err.Error())
+		return
+	}
+	// ChooseWord transitions the room and fires its own notifications.
+}
 
-	allSubmitted, err := r.SubmitDrawing(c.PlayerID, p.ImageDataURL)
+// handleDrawerRelay handles stroke:start/point/end and canvas:clear — the
+// server never parses these, it just confirms the sender is the current
+// drawer and re-broadcasts the exact same envelope to everyone else in the
+// room. Silently ignored from anyone else (not an error state — a stray
+// message from a drawer whose turn just ended, for instance).
+func (a *App) handleDrawerRelay(c *ws.Client, env ws.Envelope) {
+	if c.RoomCode == "" {
+		return
+	}
+	r, ok := a.manager.GetRoom(c.RoomCode)
+	if !ok || r.CurrentDrawerID() != c.PlayerID {
+		return
+	}
+	data, err := json.Marshal(env)
 	if err != nil {
-		a.sendError(c, "submit_failed", err.Error())
+		log.Printf("re-encode relay message: %v", err)
 		return
 	}
-	if allSubmitted {
-		r.AdvanceToGalleryNow() // fires the notifier itself
-	} else {
-		a.broadcastState(r) // so everyone's live "submitted" count updates
-	}
-}
-
-func (a *App) handleSabotageSubmit(c *ws.Client, env ws.Envelope) {
-	if c.RoomCode == "" {
-		a.sendError(c, "not_in_room", "join a room first")
-		return
-	}
-	var p ws.SabotageSubmitPayload
-	if err := json.Unmarshal(env.Payload, &p); err != nil || p.ImageDataURL == "" {
-		a.sendError(c, "bad_request", "imageDataUrl is required")
-		return
-	}
-	r, ok := a.manager.GetRoom(c.RoomCode)
-	if !ok {
-		return
-	}
-
-	allSubmitted, err := r.SubmitSabotage(c.PlayerID, p.ImageDataURL)
-	if err != nil {
-		a.sendError(c, "submit_failed", err.Error())
-		return
-	}
-	if allSubmitted {
-		r.AdvanceFromSabotageNow() // fires the notifier itself
-	} else {
-		a.broadcastState(r) // so everyone's live "submitted" count updates
-	}
-}
-
-func (a *App) handleGuessVote(c *ws.Client, env ws.Envelope) {
-	if c.RoomCode == "" {
-		a.sendError(c, "not_in_room", "join a room first")
-		return
-	}
-	var p ws.GuessVotePayload
-	if err := json.Unmarshal(env.Payload, &p); err != nil || p.TargetArtistID == "" || p.SuspectID == "" {
-		a.sendError(c, "bad_request", "targetArtistId and suspectId are required")
-		return
-	}
-	r, ok := a.manager.GetRoom(c.RoomCode)
-	if !ok {
-		return
-	}
-	if err := r.SubmitVote(c.PlayerID, p.TargetArtistID, p.SuspectID); err != nil {
-		a.sendError(c, "vote_failed", err.Error())
-		return
-	}
-	// Votes stay secret until Reveal computes the answer — no broadcast
-	// here on purpose (nothing public has changed yet).
-}
-
-// sendSabotageAssignments delivers each player's private SabotageTaskFor(...)
-// directly — never a room broadcast, since it's the answer to Guess.
-func (a *App) sendSabotageAssignments(r *room.Room) {
-	for _, p := range r.State().Players {
-		task, ok := r.SabotageTaskFor(p.ID)
-		if !ok {
-			continue // didn't submit a drawing this round, or room shrank mid-round
-		}
-		data, err := ws.Encode(ws.TypeSabotageAssignment, ws.SabotageAssignmentPayload{
-			TargetArtistID:   task.TargetArtistID,
-			TargetNickname:   task.TargetNickname,
-			OriginalImageURL: task.OriginalImage,
-			Prompt:           task.Prompt,
-		})
-		if err != nil {
-			log.Printf("encode sabotage assignment: %v", err)
-			continue
-		}
-		a.hub.SendToPlayer(r.Code, p.ID, data)
-	}
+	a.hub.BroadcastExcept(r.Code, c, data)
 }
 
 func (a *App) handleChatSend(c *ws.Client, env ws.Envelope) {
@@ -248,6 +191,20 @@ func (a *App) handleChatSend(c *ws.Client, env ws.Envelope) {
 		return
 	}
 
+	outcome := r.TrySubmitGuess(c.PlayerID, p.Text)
+	if outcome.Attempted && outcome.Correct {
+		// TrySubmitGuess already recorded a system chat message and scored
+		// it — the guessed word itself is deliberately never broadcast as
+		// this player's chat text, so anyone still guessing doesn't see it.
+		a.broadcastState(r)
+		if outcome.AllGuessed {
+			r.AdvanceTurnEarly() // fires its own notifications
+		}
+		return
+	}
+
+	// Normal chat: a wrong guess (still shown, same as Skribbl), the
+	// drawer talking, or any lobby/scoreboard chatter.
 	msg := r.AddChat(c.PlayerID, p.Text)
 	data, err := ws.Encode(ws.TypeChatMessage, msg)
 	if err != nil {
@@ -255,6 +212,26 @@ func (a *App) handleChatSend(c *ws.Client, env ws.Envelope) {
 		return
 	}
 	a.hub.Broadcast(r.Code, data)
+}
+
+func (a *App) sendWordChoices(r *room.Room) {
+	drawerID, choices := r.CurrentWordChoices()
+	data, err := ws.Encode(ws.TypeWordChoices, ws.WordChoicesPayload{Choices: choices})
+	if err != nil {
+		log.Printf("encode word choices: %v", err)
+		return
+	}
+	a.hub.SendToPlayer(r.Code, drawerID, data)
+}
+
+func (a *App) sendYourWord(r *room.Room) {
+	drawerID := r.CurrentDrawerID()
+	data, err := ws.Encode(ws.TypeYourWord, ws.YourWordPayload{Word: r.CurrentWord()})
+	if err != nil {
+		log.Printf("encode your word: %v", err)
+		return
+	}
+	a.hub.SendToPlayer(r.Code, drawerID, data)
 }
 
 func (a *App) broadcastState(r *room.Room) {

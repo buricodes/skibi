@@ -1,49 +1,28 @@
 # SketchSabotage — Build Plan
 
-**Status:** The full round loop works end-to-end — Lobby → Draw → Gallery →
-Sabotage → Guess → Reveal → back into the next round's Draw (or stays put
-after the last round) — server-authoritative throughout, verified with a
-15-check real multi-client WebSocket test run both directly against the Go
-server and through the live Vite dev proxy path. Verified specifically:
-the sabotage derangement never leaks in any broadcast (each player only
-ever learns their own assignment, direct-messaged), forced sabotage prompts
-are live, Guess targets never hint at the saboteur, and Reveal's scoring
-(+3 correct guess, +2 saboteur escapes, -1 saboteur caught) is exactly
-correct and persists across round boundaries. One real bug was caught and
-fixed in this pass: an empty (nil) Go slice was serializing as JSON `null`
-instead of `[]` for `correctGuesserIds`, which would have broken any client
-calling `.length` on it.
+**Status: the full Skribbl-style game loop is built and verified.**
+Lobby → Choosing → Drawing (with live stroke broadcasting) → back to
+Choosing for the next player's turn → Scoreboard after the configured
+rounds → Play Again resets to Lobby. Verified with real multi-client
+WebSocket tests, both directly against the Go server and through the live
+Vite dev proxy path (the exact path the browser uses):
+- Word choices are delivered only to the current drawer, never broadcast.
+- Stroke events (`stroke:start`/`point`/`end`, `canvas:clear`) relay to
+  every *other* client in the room, never echoed back to the sender, and
+  are silently ignored if sent by anyone who isn't the current drawer.
+- A wrong guess posts as ordinary chat; a correct guess never leaks the
+  literal text — it becomes a system chat entry, scores immediately, and
+  the secret word never appears anywhere in the public `room:state`.
+- Turn rotation, scoring math, and the Scoreboard/Play Again reset are also
+  covered by fast Go unit tests (`backend/internal/room/room_test.go`) that
+  drive the state machine directly.
+- Full production deploy path (embed the built frontend into the Go
+  binary, serve everything on one port) verified by actually running the
+  build sequence and hitting the resulting standalone binary — see §6.
 
-**The full game loop is complete**: Lobby → Draw → Gallery → Sabotage →
-Guess → Reveal → (next round, or Scoreboard after the last one) →
-PlayAgain resets back to Lobby, same room, same players, scores cleared.
-Verified two ways: a fast Go unit test (`internal/room/room_test.go`)
-drives the state machine directly to check round-counting and the
-PlayAgain reset without waiting on real timers, and a real ~3.5-minute,
-3-round game played through actual WebSocket messages against a live
-server confirmed the whole thing end-to-end, including a non-host's
-`room:playAgain` being correctly rejected and the host's succeeding.
-
-Not built yet: live reactions, the second "make it fun" mechanic (forced
-sabotage prompts, the first one, are already in). A before/after **slider**
-on Reveal was simplified to a plain side-by-side Before/After image pair —
-same information, less interaction surface to get wrong in the time
-available.
-
-Companion to `PRD.md`. This is the order of operations and the concrete
-engineering contract, written specifically so the real-time layer (the part
-flagged as the risky one) gets solved first and in isolation, before any
-game-phase UI is built on top of it.
-
-## 0. Build Philosophy
-
-**De-risk in this order:** rooms/sockets/chat → canvas → game phase state
-machine → phase-specific screens → polish → deploy. The reasoning: the
-real-time plumbing (a player joining a room, showing up in a live list,
-sending a chat message everyone sees) is the same mechanism every later
-phase depends on. Get that rock-solid across multiple browser tabs on day 1
-before writing a single line of "Draw phase" UI. Everything after that is
-just "another event on the same pipe."
+Not built yet: progressive letter-reveal hints, and this session hasn't
+done real-browser/visual/mobile-touch testing — everything above is
+verified at the protocol/logic level, not by clicking through the UI.
 
 ## 1. Repo Structure
 
@@ -51,200 +30,181 @@ just "another event on the same pipe."
 SketchSabotage/
   PRD.md
   BUILD_PLAN.md
+  render.yaml                 # Render Blueprint — see §6
   backend/
     go.mod
-    cmd/server/main.go        # http server bootstrap, serves frontend/dist in prod, mounts /ws
+    cmd/server/main.go        # http server bootstrap, serves the embedded
+                               # frontend build, mounts /ws, /health
     internal/
       ws/
-        hub.go                  # room membership: map[roomCode][]*Client, broadcast helpers
-        client.go                # per-connection readPump/writePump (standard gorilla pattern)
-        protocol.go               # { type, payload } envelope + typed message structs
+        hub.go                  # room membership + broadcast/relay helpers
+        client.go                # per-connection readPump/writePump
+        protocol.go               # { type, payload } envelope + typed messages
+        id.go
       room/
-        room.go                   # one room's state + phase-transition methods
-        manager.go                  # map[code]*Room, create/join/leave, code generation
-        types.go                     # Room, Player, Drawing, Vote, etc. (mirrors PRD §8)
-        words.go                      # word list for Draw phase
-        sabotage.go                    # forced-prompt list + derangement assignment
-        scoring.go                      # pure functions: votes+truth -> score deltas
-        timer.go                         # time.AfterFunc-based phase advance, phaseEndsAt helper
+        room.go                   # state machine: turns, choosing, drawing, scoring
+        room_test.go                # unit tests driving the state machine directly
+        manager.go                   # map[code]*Room, create/join/leave
+        types.go                     # Room, Player, ChatMessage, PlayerScore, State
+        words.go                      # word list + pickWordChoices
+        id.go
+      staticfiles/
+        embed.go                       # //go:embed dist — the built frontend
+        dist/index.html                 # placeholder until a real build runs
+      app/
+        app.go                          # wires ws transport <-> room logic
   frontend/
     (vite react-ts scaffold)
     src/
-      socket.ts                # single native WebSocket instance + typed send/on helpers
+      lib/
+        socket.ts               # native WebSocket wrapper + typed send/on
+        types.ts                 # mirrors the Go protocol/room types by hand
+        useCountdown.ts
       state/
-        GameContext.tsx        # holds latest `room:state` from server, exposes via context
+        GameContext.tsx           # latest room:state + word:choices/word:yours +
+                                   # stroke send helpers, exposed via context
       components/
-        Canvas.tsx              # shared by Draw + Sabotage phases (pointer events)
-        Timer.tsx                # renders countdown from a phaseEndsAt prop
+        Canvas.tsx                 # interactive (drawer) or read-only (guesser,
+                                    # driven by applyRemote* calls) — same component
+        Chat.tsx                    # renders real messages + system announcements
         PlayerList.tsx
-        Chat.tsx
-        ReactionBar.tsx
+        Timer.tsx
       screens/
         Home.tsx
-        Lobby.tsx
-        Draw.tsx
-        Gallery.tsx
-        Sabotage.tsx
-        Guess.tsx
-        Reveal.tsx
+        Lobby.tsx                    # room code, QR, invite link, chat, Start
+        Choosing.tsx                  # word-picker (drawer) / waiting (everyone else)
+        Draw.tsx                       # the live drawing round, both roles
         Scoreboard.tsx
-      App.tsx                  # switches on room.phase -> renders the matching screen
+      App.tsx                          # switches on room.phase -> matching screen
 ```
 
 ## 2. The Socket Event Contract
-
-This table *is* the answer to "how do we avoid the realtime stuff turning
-into a mess": every event is listed up front, nothing improvised mid-build.
 
 ### Client → Server (intents)
 
 | Event | Payload | Notes |
 |---|---|---|
 | `room:create` | `{ nickname }` | server generates room code, caller becomes host |
-| `room:join` | `{ code, nickname }` | rejects if room full/started; on success server adds player |
-| `room:start` | `{}` | host-only; validates min players; begins round 1 |
-| `room:kick` | `{ playerId }` | host-only |
-| `draw:submit` | `{ imageDataUrl }` | during Draw phase; one per player per round |
-| `sabotage:submit` | `{ imageDataUrl }` | during Sabotage phase; only accepted from the assigned saboteur |
-| `guess:vote` | `{ targetArtistId, suspectId }` | during Guess phase; last vote from a player overwrites their earlier one |
-| `chat:send` | `{ text }` | any phase |
-| `reaction:send` | `{ targetArtistId, emoji }` | Gallery/Guess phases |
-| `room:playAgain` | `{}` | host-only, from Scoreboard |
+| `room:join` | `{ code, nickname }` | rejects if room full/started |
+| `room:start` | `{}` | host-only; snapshots turn order, begins turn 1 |
+| `room:playAgain` | `{}` | host-only, from Scoreboard; resets to Lobby |
+| `word:choose` | `{ word }` | current drawer only, during Choosing |
+| `stroke:start` | `{ x, y, color, size }` | current drawer only; relayed as-is |
+| `stroke:point` | `{ x, y }` | current drawer only; relayed as-is |
+| `stroke:end` | `{}` | current drawer only; relayed as-is |
+| `canvas:clear` | `{}` | current drawer only; relayed as-is |
+| `chat:send` | `{ text }` | any phase — during Drawing, first checked as a guess |
 
-### Server → Client (state broadcasts)
+### Server → Client (room broadcasts)
 
 | Event | Payload | Notes |
 |---|---|---|
-| `room:state` | full `Room` (minus other players' in-progress canvases) | sent on join and after every mutation — simplest possible sync model: client always just re-renders from the latest full state rather than diffing/patching |
-| `phase:change` | `{ phase, phaseEndsAt, round }` | authoritative; client starts its local countdown from this |
-| `chat:message` | `{ id, senderId, nickname, text, ts }` | broadcast to whole room including sender |
-| `reaction:broadcast` | `{ targetArtistId, emoji, fromId }` | ephemeral, client just animates it, not stored in `room:state` |
-| `error` | `{ code, message }` | e.g. room full, room not found, wrong phase for this action |
-| `self:info` | `{ playerId, roomCode }` | sent directly to one connection (not room-broadcast) right after `room:create`/`room:join`, so the client can tell which entry in `room:state.players` is itself |
+| `room:state` | full `Room` state | sent whole, every time, to everyone in the room — see §3 |
+| `chat:message` | `{ id, senderId?, nickname?, text, ts, system? }` | real messages *and* system announcements share one feed |
+| `stroke:start`/`stroke:point`/`stroke:end`/`canvas:clear` | same shape as the client→server version | relayed to everyone except the drawer who sent it |
+| `error` | `{ code, message }` | e.g. wrong phase, not your turn, invalid word choice |
 
-Deliberate simplicity: `room:state` is the whole room, sent whole, every
-time. For 3–10 players and small images this is fine on wifi and removes an
-entire category of bugs (partial/patch state getting out of sync) that would
-cost more time than the bandwidth it'd save. If this turns out to be too
-chatty during testing, the fallback isn't a redesign — it's just trimming
-what's included in `room:state` (e.g. omit other players' full chat history
-after the first send).
+### Server → Client (direct to one connection, never broadcast)
 
-**Go implementation shape:** `protocol.go` defines one envelope struct
-(`type Message struct { Type string; Payload json.RawMessage }`) plus one Go
-struct per message type listed in the tables above. `hub.go`'s
-`Broadcast(roomCode string, msg any)` marshals once and writes to every
-client's send channel in that room; each `client.go` has the standard
-gorilla `readPump`/`writePump` goroutine pair (one goroutine reading off the
-socket, one draining a buffered `chan []byte` to it) so a slow client can
-never block the room's broadcast loop.
+| Event | Payload | Notes |
+|---|---|---|
+| `self:info` | `{ playerId, roomCode }` | so a client can tell which entry in `room:state.players` is itself |
+| `word:choices` | `{ choices: string[] }` | sent only to the current drawer, right as Choosing begins |
+| `word:yours` | `{ word }` | sent only to the current drawer, right as Drawing begins (covers both manual choice and the auto-pick-on-timeout case) |
 
-## 3. Phase State Machine (server-authoritative)
+Deliberate simplicity, same as before: `room:state` is the whole public
+room, sent whole, every time. The one thing that's genuinely never in
+there is the secret word — that's the actual thing that must never leak,
+so it doesn't ride on the same "send everything" channel at all.
+
+## 3. Turn State Machine (server-authoritative)
 
 ```
-lobby --room:start--> draw --timeout/all-submitted--> gallery
-  --timeout--> sabotage --timeout/submitted--> guess
-  --timeout--> reveal --timeout--> (round < total? -> draw : scoreboard)
+lobby --room:start--> choosing(turn 1)
+  --word:choose/timeout--> drawing
+  --all-guessed/timeout--> choosing(next turn)
+  ... repeats totalRounds * playerCount times ...
+  --last turn ends--> scoreboard
 scoreboard --room:playAgain--> lobby
 ```
 
-Implementation detail: `Room.ts` owns one method per transition
-(`beginDraw()`, `beginGallery()`, `beginSabotage()`, `beginGuess()`,
-`beginReveal()`, `beginScoreboard()`), each of which:
-1. mutates `phase` and sets `phaseEndsAt`,
-2. does any phase-entry computation (e.g. `beginSabotage()` computes the
-   derangement assignment),
-3. arms a `setTimeout` for the *next* transition,
-4. broadcasts `phase:change` + a fresh `room:state`.
+`turnsCompleted` and a fixed `totalTurns = totalRounds * len(turnOrder)`
+drive this — `currentDrawer = turnOrder[turnsCompleted % len(turnOrder)]`,
+`round = turnsCompleted/len(turnOrder) + 1`. Early-advance (word chosen
+before the choose-timer expires; everyone's guessed before the draw-timer
+expires) and timeout-driven advance both call the exact same
+`beginDrawing()`/`endTurn()` functions — one code path per transition
+regardless of what triggered it, the same discipline used throughout.
 
-Early-advance (everyone submitted before the timer) just clears the pending
-timeout and calls the next `begin*()` immediately — same function either way,
-so there's exactly one code path per transition regardless of how it was
-triggered.
+## 4. Stroke Relay — the mechanism that makes this a real Skribbl clone
 
-## 4. Day-by-Day Schedule
+The server does not understand drawing. `internal/app/app.go`'s
+`handleDrawerRelay` does exactly one thing for all four stroke/clear event
+types: confirm `r.CurrentDrawerID() == c.PlayerID`, then re-marshal the
+already-decoded envelope and `hub.BroadcastExcept(roomCode, sender, data)`.
+No stroke data is ever stored server-side or inspected — it's a pure,
+stateless relay. This is the deliberate opposite of the earlier
+"submit-a-final-image" design: it's more real-time-correct (what Skribbl
+actually needs) and, because the server never parses stroke content,
+genuinely simpler to implement than image-based submission was.
 
-### Day 1 — real-time core + drawing
-
-1. Scaffold `backend/` (`go mod init`, `gorilla/websocket`, the
-   `cmd/server` + `internal/ws` + `internal/room` layout above) and
-   `frontend/` (Vite+React+TS+Tailwind). During dev, run
-   `go run ./cmd/server` and `npm run dev` (Vite) side by side in two
-   terminals, Vite proxying `/ws` to the Go server's port — no need for a
-   root-level process manager the way the Node plan used `concurrently`.
-2. `RoomManager` + `room:create`/`room:join`/`room:state` over the raw
-   WebSocket. Prove it works with **two real browser tabs**: create in one,
-   join in the other, see both show up in `room:state`. This is the
-   checkpoint that de-risks everything else — don't move on until this is
-   solid.
-3. Chat (`chat:send` / `chat:message`) — same pattern, second real-time
-   feature proves the pattern generalizes.
-4. Lobby screen: room code + QR (use `qrcode` npm package server-side or
-   `qrcode.react` client-side), player list, chat panel, Start button.
-5. `Canvas.tsx` — pointer-events-based drawing (down/move/up), stroke
-   color/size, clear, undo-last-stroke, exports current state as a
-   `imageDataUrl` via `canvas.toDataURL()`. Build and test this standalone
-   before wiring it to any socket event.
-6. Wire Draw phase: `beginDraw()` on the server, `draw:submit` intent,
-   `Timer.tsx` countdown from `phaseEndsAt`, auto-submit current canvas
-   content when the countdown local-side hits 0 (server also force-advances
-   independently — client auto-submit is a courtesy, not the safety net).
-
-**End of Day 1 checkpoint:** two+ people can create/join a room, chat, and
-both submit a drawing for the same word before a shared timer runs out.
-
-### Day 2 — the rest of the loop, fun mechanics, polish, deploy
-
-1. Gallery: grid of submitted drawings + artist labels + `ReactionBar`.
-2. Sabotage: derangement assignment (`scoring.ts`/room logic — simple: shuffle
-   player-id list, pair `i` with `i+1 mod n`, reroll if any self-pair, which
-   can't happen with a proper cyclic shift), forced-prompt selection,
-   saboteur's `Canvas.tsx` reused with the original image pre-loaded as
-   background, non-saboteurs see a waiting screen.
-3. Guess: show sabotaged images, per-drawing suspect buttons, `guess:vote`,
-   chat still live, reactions still live.
-4. Reveal: before/after slider (a simple draggable clip-path/overlay — no
-   library needed), saboteur reveal, correct guessers, `scoring.ts` applies
-   point deltas, `room:state.scores` updates.
-5. Scoreboard: round-by-round table, crown, Play Again / Back to Lobby.
-6. Must-have fun mechanics if not already folded in above: confirm forced
-   sabotage prompts feel funny (swap/extend the prompt list from actual
-   playtesting), confirm reactions are visibly live across two tabs.
-7. Visual pass to match the reference mockup's dark theme, card styling,
-   spacing — Tailwind, no custom design system needed for a 2-day build.
-8. Multi-device test: real phones on real wifi, not just desktop browser
-   tabs (see checklist below).
-9. Deploy to Render: `render.yaml` or dashboard-configured single Go web
-   service (`go build -o server ./cmd/server` then `./server`, with the
-   frontend built via `npm run build` into `frontend/dist` ahead of the Go
-   build so it can be embedded/served), confirm WebSocket upgrade works on
-   the deployed URL, not just localhost.
-10. Stretch (only if time remains, in this order): SQLite-backed past-games
-    list, shareable recap card, custom word packs, kick-player UI polish.
+On the frontend, `components/Canvas.tsx` is the same component for both
+roles — `interactive={true}` (the drawer) wires pointer events to
+`onStrokeStart`/`onStrokePoint`/`onStrokeEnd`/`onClear` callbacks that the
+`Draw` screen forwards to the socket; `interactive={false}` (everyone else)
+never accepts pointer input and is driven purely by
+`applyRemoteStrokeStart`/`applyRemoteStrokePoint`/`applyRemoteStrokeEnd`/`applyRemoteClear`
+calls wired to the incoming relayed events. Coordinates are portable
+between clients because the canvas's internal pixel resolution
+(480×360) is fixed and identical for every client regardless of how large
+it's displayed via CSS.
 
 ## 5. Manual Test Checklist (before calling it done)
 
-- [ ] Two tabs: create + join, both see each other in the player list live.
-- [ ] Three tabs: chat message from one appears instantly in the other two.
-- [ ] Draw phase: canvas works with mouse (desktop) and touch (phone).
-- [ ] A player who never submits a drawing doesn't block the phase from
-      advancing when the timer runs out.
-- [ ] Sabotage never assigns a player their own drawing (run a few rounds
-      with varying player counts, including edge case of exactly 3 players).
-- [ ] A player who disconnects mid-round doesn't crash the room for others.
-- [ ] Full 3-round game completes and lands on a correct Scoreboard.
-- [ ] Same test, but on the **deployed** URL with real phones on real wifi,
-      not localhost — this is the one that actually matters for the demo.
+- [x] Two tabs: create + join, live player list, chat.
+- [x] Word choices arrive only at the drawer; the word itself never
+      appears in `room:state` or leaks through chat.
+- [x] Stroke events relay live to the other tab and never echo back to the
+      drawer; a non-drawer's stroke attempt is silently ignored.
+- [x] A wrong guess shows as normal chat; a correct guess scores, posts a
+      system message, and ends the turn early if it was the last eligible
+      guesser.
+- [x] Turn rotates to the next player; after all rounds, lands on
+      Scoreboard; Play Again resets scores/turns and returns to Lobby.
+- [ ] Real phones on real wifi, not just localhost tabs — needs a human
+      with a phone, not something this session can verify alone.
+- [ ] Actually looks right / feels right — no browser-automation tool is
+      available in this session; only protocol-level and build-level
+      verification has been done on the frontend.
 
 ## 6. Deployment Notes
 
-- Single Render "Web Service." Build command:
-  `cd frontend && npm install && npm run build && cd ../backend && go build -o server ./cmd/server`.
-  Start command: `./backend/server`.
-- `cmd/server/main.go` serves `frontend/dist` as static files (via Go's
-  `embed` package, so the built frontend ships inside the single binary —
-  simplest possible deploy artifact) and mounts the `/ws` upgrade handler on
-  the same `net/http` server — one URL, one process, nothing else to
-  configure.
-- No environment variables/secrets required for the MVP (see PRD §11), which
-  removes an entire class of "it works locally but not deployed" failures.
+**Status: done and verified.** `render.yaml` at the repo root is a
+ready-to-use Blueprint — Render's dashboard → "New" → "Blueprint" → point
+it at this repo picks it up automatically. It runs:
+
+```
+cd frontend && npm install && npm run build && cd ..
+rm -rf backend/internal/staticfiles/dist
+cp -r frontend/dist backend/internal/staticfiles/dist
+cd backend && go build -o server ./cmd/server
+```
+
+then starts `./backend/server`. `backend/internal/staticfiles/embed.go`
+embeds that copied `dist/` directory into the binary via `//go:embed` (a
+placeholder `dist/index.html` is committed so `go build`/`go run` keep
+working before a frontend build has ever run locally). `cmd/server/main.go`
+serves the embedded frontend at `/` and mounts `/ws` and `/health` on the
+same `net/http` server. It reads the `PORT` env var (Render sets this
+automatically), falling back to `8080` for local dev.
+
+**Verified locally** by running the exact sequence above by hand and
+hitting the resulting standalone binary directly — it served the real
+built app and the WebSocket flow worked on the same port, no Vite dev
+server involved.
+
+No environment variables/secrets required.
+
+**Remaining manual step**: push the local git repo to GitHub, then connect
+it on Render's dashboard as a Blueprint — needs an account, so it's on the
+project owner, not something this session can do.

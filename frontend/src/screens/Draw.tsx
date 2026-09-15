@@ -1,68 +1,85 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef } from 'react';
 import { Canvas } from '@/components/Canvas';
 import type { CanvasHandle } from '@/components/Canvas';
+import { Chat } from '@/components/Chat';
 import { Timer } from '@/components/Timer';
-import { useCountdown } from '@/lib/useCountdown';
+import { socket } from '@/lib/socket';
+import { TYPE_CANVAS_CLEAR, TYPE_STROKE_END, TYPE_STROKE_POINT, TYPE_STROKE_START } from '@/lib/types';
+import type { StrokePoint, StrokeStart } from '@/lib/types';
 import { useGame } from '@/state/GameContext';
 
 export function Draw() {
-  const { room, submitDrawing } = useGame();
+  const {
+    room,
+    self,
+    isDrawer,
+    yourWord,
+    sendChat,
+    sendStrokeStart,
+    sendStrokePoint,
+    sendStrokeEnd,
+    sendCanvasClear,
+  } = useGame();
   const canvasRef = useRef<CanvasHandle>(null);
-  const [hasSubmitted, setHasSubmitted] = useState(false);
-  const remainingMs = useCountdown(room?.phaseEndsAt);
-  const timeIsUp = remainingMs === 0;
 
-  // A new round (server assigns a fresh word + resets phaseEndsAt) means a
-  // fresh canvas and a fresh submit gate.
+  // Guessers only: replay whatever the current drawer broadcasts. The
+  // drawer doesn't subscribe to these — they ARE the source, their own
+  // Canvas already rendered their strokes locally as they drew them.
   useEffect(() => {
-    setHasSubmitted(false);
-    canvasRef.current?.clear();
-  }, [room?.round]);
-
-  useEffect(() => {
-    if (timeIsUp && !hasSubmitted) handleSubmit();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [timeIsUp]);
+    if (isDrawer) return;
+    const offs = [
+      socket.on<StrokeStart>(TYPE_STROKE_START, (s) => canvasRef.current?.applyRemoteStrokeStart(s)),
+      socket.on<StrokePoint>(TYPE_STROKE_POINT, (p) => canvasRef.current?.applyRemoteStrokePoint(p)),
+      socket.on(TYPE_STROKE_END, () => canvasRef.current?.applyRemoteStrokeEnd()),
+      socket.on(TYPE_CANVAS_CLEAR, () => canvasRef.current?.applyRemoteClear()),
+    ];
+    return () => offs.forEach((off) => off());
+  }, [isDrawer]);
 
   if (!room) return null;
 
-  function handleSubmit() {
-    if (hasSubmitted) return;
-    const dataUrl = canvasRef.current?.getDataUrl();
-    if (!dataUrl) return;
-    submitDrawing(dataUrl);
-    setHasSubmitted(true);
-  }
+  const blanks = Array.from({ length: room.wordLength ?? 0 })
+    .map(() => '_')
+    .join(' ');
 
   return (
-    <div className="mx-auto flex min-h-svh max-w-lg flex-col items-center gap-4 px-6 py-8">
-      <div className="flex w-full items-center justify-between">
+    <div className="mx-auto flex min-h-svh max-w-4xl flex-col gap-4 px-6 py-8">
+      <div className="flex items-center justify-between">
         <p className="text-sm text-white/50">
           Round {room.round} / {room.totalRounds}
         </p>
         <Timer phaseEndsAt={room.phaseEndsAt} />
       </div>
 
-      <h2 className="text-2xl font-bold text-white">
-        Draw: <span className="text-accent">{room.word}</span>
+      <h2 className="text-center text-2xl font-bold tracking-widest text-white">
+        {isDrawer ? (
+          <>
+            Draw: <span className="text-accent">{yourWord}</span>
+          </>
+        ) : (
+          blanks
+        )}
       </h2>
 
-      <Canvas ref={canvasRef} disabled={hasSubmitted} />
+      <div className="grid flex-1 grid-cols-1 gap-6 md:grid-cols-[1fr_320px]">
+        <Canvas
+          ref={canvasRef}
+          interactive={isDrawer}
+          onStrokeStart={sendStrokeStart}
+          onStrokePoint={sendStrokePoint}
+          onStrokeEnd={sendStrokeEnd}
+          onClear={sendCanvasClear}
+        />
 
-      <p className="text-sm text-white/50">
-        {room.submittedCount} / {room.players.length} submitted
-      </p>
-
-      {hasSubmitted ? (
-        <p className="text-white/60">Waiting for everyone else…</p>
-      ) : (
-        <button
-          onClick={handleSubmit}
-          className="w-full rounded-lg bg-accent py-2.5 font-medium text-white hover:opacity-90"
-        >
-          Submit Drawing
-        </button>
-      )}
+        <div className="h-80 md:h-auto">
+          <Chat
+            messages={room.chat}
+            selfId={self?.playerId ?? null}
+            onSend={sendChat}
+            placeholder={isDrawer ? 'Chat…' : 'Type your guess…'}
+          />
+        </div>
+      </div>
     </div>
   );
 }

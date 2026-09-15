@@ -45,6 +45,20 @@ func (h *Hub) Broadcast(roomCode string, data []byte) {
 	}
 }
 
+// BroadcastExcept writes data to every client in roomCode except one —
+// used to relay the drawer's own stroke events to everyone else without
+// echoing them back to the drawer, who already rendered them locally.
+func (h *Hub) BroadcastExcept(roomCode string, exclude *Client, data []byte) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for c := range h.rooms[roomCode] {
+		if c == exclude {
+			continue
+		}
+		c.Send(data)
+	}
+}
+
 // SendToPlayer writes data to just the one connection in roomCode whose
 // PlayerID matches — used for messages that must stay private to one
 // player, like a Sabotage assignment (never a room broadcast). A room of

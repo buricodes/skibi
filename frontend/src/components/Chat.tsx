@@ -5,10 +5,12 @@ export function Chat({
   messages,
   selfId,
   onSend,
+  placeholder = 'Type a message...',
 }: {
   messages: ChatMessage[];
   selfId: string | null;
   onSend: (text: string) => void;
+  placeholder?: string;
 }) {
   const [draft, setDraft] = useState('');
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -32,18 +34,24 @@ export function Chat({
       </div>
       <div ref={scrollRef} className="flex-1 space-y-1.5 overflow-y-auto px-3 py-2 text-sm">
         {messages.length === 0 && <p className="text-white/30">No messages yet</p>}
-        {messages.map((m) => (
-          <p key={m.id} className={m.senderId === selfId ? 'text-accent' : 'text-white/80'}>
-            <span className="font-medium">{m.nickname}: </span>
-            <span className="text-white/70">{m.text}</span>
-          </p>
-        ))}
+        {messages.map((m) =>
+          m.system ? (
+            <p key={m.id} className="text-center text-xs italic text-white/40">
+              {m.text}
+            </p>
+          ) : (
+            <p key={m.id} className={m.senderId === selfId ? 'text-accent' : 'text-white/80'}>
+              <span className="font-medium">{m.nickname}: </span>
+              <span className="text-white/70">{m.text}</span>
+            </p>
+          ),
+        )}
       </div>
       <form onSubmit={submit} className="flex gap-2 border-t border-border p-2">
         <input
           value={draft}
           onChange={(e) => setDraft(e.target.value)}
-          placeholder="Type a message..."
+          placeholder={placeholder}
           maxLength={300}
           className="min-w-0 flex-1 rounded-md border border-border bg-panel-2 px-2 py-1.5 text-sm outline-none focus:border-accent"
         />

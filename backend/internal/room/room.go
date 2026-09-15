@@ -2,45 +2,43 @@ package room
 
 import (
 	"errors"
-	"sort"
+	"fmt"
+	"strings"
 	"sync"
 	"time"
 )
 
 const (
-	maxPlayers     = 10 // PRD.md §11
+	maxPlayers     = 10
 	maxChatHistory = 200
 
-	// minPlayersToStart is 2 rather than PRD.md §4's suggested 3 default —
-	// makes local testing (two browser tabs) actually possible without
-	// wrangling a third client. Bump it before a real multi-player demo if
-	// 2-player rounds feel too thin.
+	// minPlayersToStart is 2: one drawer, one guesser is a perfectly valid
+	// (if quiet) game, and it makes local testing (two browser tabs)
+	// possible without wrangling a third client.
 	minPlayersToStart  = 2
-	totalRoundsDefault = 3
+	totalRoundsDefault = 3 // one "round" = every player draws once
+	wordChoicesCount   = 3
 
-	drawDuration     = 60 * time.Second
-	galleryDuration  = 10 * time.Second
-	sabotageDuration = 30 * time.Second
-	guessDuration    = 45 * time.Second
-	revealDuration   = 15 * time.Second
+	chooseDuration   = 10 * time.Second
+	drawTurnDuration = 80 * time.Second
 
-	// Scoring (PRD.md §4 "Scoring (per round)").
-	pointsForCorrectGuess    = 3
-	pointsForSaboteurCaught  = -1
-	pointsForSaboteurEscaped = 2
+	// Scoring: faster correct guesses score more; the drawer scores per
+	// correct guesser, rewarding a drawing people can actually read.
+	pointsForFirstGuess       = 3
+	pointsForSecondGuess      = 2
+	pointsForLaterGuess       = 1
+	pointsForDrawerPerGuesser = 1
 )
 
 var (
-	ErrAlreadyInRoom    = errors.New("already in room")
-	ErrRoomFull         = errors.New("room is full")
-	ErrNotHost          = errors.New("only the host can do that")
-	ErrAlreadyStarted   = errors.New("game already started")
-	ErrNotEnoughPlayers = errors.New("need at least 2 players to start")
-	ErrWrongPhase       = errors.New("not accepting that right now")
-	ErrNotInRoom        = errors.New("you're not a player in this room")
-	ErrNotASaboteur     = errors.New("you're not assigned to sabotage anything this round")
-	ErrNoSuchTarget     = errors.New("no such drawing to guess on this round")
-	ErrNoSuchPlayer     = errors.New("no such player")
+	ErrAlreadyInRoom     = errors.New("already in room")
+	ErrRoomFull          = errors.New("room is full")
+	ErrNotHost           = errors.New("only the host can do that")
+	ErrAlreadyStarted    = errors.New("game already started")
+	ErrNotEnoughPlayers  = errors.New("need at least 2 players to start")
+	ErrWrongPhase        = errors.New("not accepting that right now")
+	ErrNotYourTurn       = errors.New("it's not your turn to draw")
+	ErrInvalidWordChoice = errors.New("not one of the offered word choices")
 )
 
 // Room owns one game's state and is safe for concurrent use — every client
@@ -58,58 +56,45 @@ type Room struct {
 
 	chat []ChatMessage
 
-	round       int
-	totalRounds int
-	word        string
-	drawings    map[string]Drawing
+	// Turn state. turnOrder is a snapshot of player IDs taken at Start() —
+	// fixed for the whole game, so a mid-game disconnect doesn't reshuffle
+	// whose turn it is.
+	turnOrder      []string
+	turnsCompleted int
+	totalTurns     int
+
+	word            string   // secret — never put in State, only sent privately to the drawer
+	wordChoices     []string // the 3 candidates offered to the current drawer
+	correctGuessers map[string]bool
+	guessOrder      []string
+
 	phaseEndsAt time.Time
 	timer       *time.Timer
 
-	// Sabotage-phase state. sabotageAssignments maps originalArtistID ->
-	// saboteurPlayerID (the derangement, PRD.md §4 step 4) — deliberately
-	// never sent whole to clients, since it's the answer to the Guess phase.
-	// Cleared and recomputed each round.
-	sabotageAssignments map[string]string
-	sabotagePrompts     map[string]string  // originalArtistID -> forced prompt
-	sabotagedDrawings   map[string]Drawing // originalArtistID -> the edited version
-
-	// Guess-phase state. votes[targetArtistID][voterID] = suspectPlayerID.
-	votes map[string]map[string]string
-
-	// revealResults is computed once at the start of Reveal (Room.beginReveal)
-	// and cached, rather than recomputed on every State() call.
-	revealResults []RevealResult
-
-	// scores accumulate across the whole game (not reset between rounds),
-	// keyed by player id. Initialized in Start().
 	scores map[string]int
 
 	// notify is called (unlocked) after any state change the timer itself
-	// causes, so the app layer can broadcast — see SetNotifier and
-	// BUILD_PLAN.md §3. Player join/chat/etc. are triggered by an explicit
-	// client request, so the app layer broadcasts after those directly
-	// instead of relying on this.
+	// causes, so the app layer can broadcast. Player join/chat/etc. are
+	// triggered by an explicit client request, so the app layer broadcasts
+	// after those directly instead of relying on this.
 	notify func()
 
-	// onEnterSabotage fires (unlocked) once, right after sabotageAssignments
-	// is computed, so the app layer can send each player their own private
-	// SabotageTaskFor(...) — a per-player message, not a room broadcast.
-	onEnterSabotage func()
+	// onEnterChoosing/onEnterDrawing fire (unlocked) so the app layer can
+	// deliver the current drawer's private messages (the 3 word choices,
+	// then the confirmed word) — never broadcast, since they're secret.
+	onEnterChoosing func()
+	onEnterDrawing  func()
 }
 
 func newRoom(code, hostID string) *Room {
 	return &Room{
-		Code:     code,
-		hostID:   hostID,
-		phase:    PhaseLobby,
-		players:  make(map[string]*Player),
-		drawings: make(map[string]Drawing),
+		Code:    code,
+		hostID:  hostID,
+		phase:   PhaseLobby,
+		players: make(map[string]*Player),
 	}
 }
 
-// SetNotifier wires up the callback the phase timer uses to push state to
-// clients without an explicit request driving it. Call once, right after
-// the room is created.
 func (r *Room) SetNotifier(fn func()) {
 	r.mu.Lock()
 	r.notify = fn
@@ -125,17 +110,30 @@ func (r *Room) fireNotify() {
 	}
 }
 
-// SetOnEnterSabotage wires up the callback used to deliver each player's
-// private sabotage assignment. Call once, right after the room is created.
-func (r *Room) SetOnEnterSabotage(fn func()) {
+func (r *Room) SetOnEnterChoosing(fn func()) {
 	r.mu.Lock()
-	r.onEnterSabotage = fn
+	r.onEnterChoosing = fn
 	r.mu.Unlock()
 }
 
-func (r *Room) fireEnterSabotage() {
+func (r *Room) SetOnEnterDrawing(fn func()) {
 	r.mu.Lock()
-	fn := r.onEnterSabotage
+	r.onEnterDrawing = fn
+	r.mu.Unlock()
+}
+
+func (r *Room) fireEnterChoosing() {
+	r.mu.Lock()
+	fn := r.onEnterChoosing
+	r.mu.Unlock()
+	if fn != nil {
+		fn()
+	}
+}
+
+func (r *Room) fireEnterDrawing() {
+	r.mu.Lock()
+	fn := r.onEnterDrawing
 	r.mu.Unlock()
 	if fn != nil {
 		fn()
@@ -164,13 +162,24 @@ func (r *Room) AddPlayer(id, nickname string) error {
 
 // SetConnected marks a player connected/disconnected without removing them
 // from the room — a flaky phone shouldn't wreck a live game for everyone
-// else (PRD.md §9, "Reconnection").
+// else.
 func (r *Room) SetConnected(id string, connected bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if p, ok := r.players[id]; ok {
 		p.Connected = connected
 	}
+}
+
+func (r *Room) appendChatLocked(msg ChatMessage) {
+	r.chat = append(r.chat, msg)
+	if len(r.chat) > maxChatHistory {
+		r.chat = r.chat[len(r.chat)-maxChatHistory:]
+	}
+}
+
+func (r *Room) addSystemMessageLocked(text string) {
+	r.appendChatLocked(ChatMessage{ID: randomID(), Text: text, Ts: time.Now().UnixMilli(), System: true})
 }
 
 func (r *Room) AddChat(senderID, text string) ChatMessage {
@@ -181,17 +190,8 @@ func (r *Room) AddChat(senderID, text string) ChatMessage {
 	if p, ok := r.players[senderID]; ok {
 		nickname = p.Nickname
 	}
-	msg := ChatMessage{
-		ID:       randomID(),
-		SenderID: senderID,
-		Nickname: nickname,
-		Text:     text,
-		Ts:       time.Now().UnixMilli(),
-	}
-	r.chat = append(r.chat, msg)
-	if len(r.chat) > maxChatHistory {
-		r.chat = r.chat[len(r.chat)-maxChatHistory:]
-	}
+	msg := ChatMessage{ID: randomID(), SenderID: senderID, Nickname: nickname, Text: text, Ts: time.Now().UnixMilli()}
+	r.appendChatLocked(msg)
 	return msg
 }
 
@@ -208,7 +208,8 @@ func (r *Room) IsEmpty() bool {
 	return true
 }
 
-// Start moves Lobby -> Draw for round 1. Host-only, and only from Lobby.
+// Start moves Lobby -> the first turn's word-choosing phase. Host-only.
+// The turn order is a snapshot of current players — fixed for the game.
 func (r *Room) Start(requesterID string) error {
 	r.mu.Lock()
 	if requesterID != r.hostID {
@@ -223,16 +224,19 @@ func (r *Room) Start(requesterID string) error {
 		r.mu.Unlock()
 		return ErrNotEnoughPlayers
 	}
-	r.totalRounds = totalRoundsDefault
-	r.round = 0
-	r.scores = make(map[string]int, len(r.players))
+
+	order := make([]string, len(r.order))
+	copy(order, r.order)
+	r.turnOrder = order
+	r.totalTurns = totalRoundsDefault * len(order)
+	r.turnsCompleted = 0
+	r.scores = make(map[string]int, len(order))
 	r.mu.Unlock()
 
-	r.beginDraw()
+	r.beginChoosing()
 	return nil
 }
 
-// cancelTimerLocked assumes the caller holds r.mu.
 func (r *Room) cancelTimerLocked() {
 	if r.timer != nil {
 		r.timer.Stop()
@@ -240,280 +244,195 @@ func (r *Room) cancelTimerLocked() {
 	}
 }
 
-// beginDraw and beginGallery are each used both as the timeout-driven
-// transition (passed straight to time.AfterFunc) and the early-advance path
-// (called directly once everyone's submitted) — one code path either way,
-// per BUILD_PLAN.md §3.
-func (r *Room) beginDraw() {
+// currentDrawerIDLocked assumes the caller holds r.mu.
+func (r *Room) currentDrawerIDLocked() string {
+	if len(r.turnOrder) == 0 {
+		return ""
+	}
+	return r.turnOrder[r.turnsCompleted%len(r.turnOrder)]
+}
+
+func (r *Room) CurrentDrawerID() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.currentDrawerIDLocked()
+}
+
+func (r *Room) CurrentWord() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.word
+}
+
+// CurrentWordChoices reports the current drawer and their 3 offered words —
+// used by the app layer to deliver the private word:choices message.
+func (r *Room) CurrentWordChoices() (drawerID string, choices []string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.currentDrawerIDLocked(), append([]string(nil), r.wordChoices...)
+}
+
+// beginChoosing starts a turn: pick 3 word candidates, announce whose turn
+// it is, arm an auto-pick timer in case the drawer doesn't choose in time.
+func (r *Room) beginChoosing() {
 	r.mu.Lock()
 	r.cancelTimerLocked()
-	r.phase = PhaseDraw
-	r.round++
-	r.word = pickWord()
-	r.drawings = make(map[string]Drawing)
-	r.phaseEndsAt = time.Now().Add(drawDuration)
-	r.timer = time.AfterFunc(drawDuration, r.beginGallery)
+	r.phase = PhaseChoosing
+	r.word = ""
+	r.correctGuessers = make(map[string]bool)
+	r.guessOrder = nil
+	r.wordChoices = pickWordChoices(wordChoicesCount)
+
+	drawerID := r.currentDrawerIDLocked()
+	drawerNickname := "someone"
+	if p, ok := r.players[drawerID]; ok {
+		drawerNickname = p.Nickname
+	}
+	r.addSystemMessageLocked(fmt.Sprintf("%s is choosing a word…", drawerNickname))
+
+	r.phaseEndsAt = time.Now().Add(chooseDuration)
+	r.timer = time.AfterFunc(chooseDuration, r.autoPickWord)
 	r.mu.Unlock()
 
 	r.fireNotify()
+	r.fireEnterChoosing()
 }
 
-func (r *Room) beginGallery() {
+func (r *Room) autoPickWord() {
 	r.mu.Lock()
-	r.cancelTimerLocked()
-	r.phase = PhaseGallery
-	r.phaseEndsAt = time.Now().Add(galleryDuration)
-	r.timer = time.AfterFunc(galleryDuration, r.afterGallery)
+	choices := r.wordChoices
 	r.mu.Unlock()
-
-	r.fireNotify()
-}
-
-// AdvanceToGalleryNow lets the app layer skip straight to Gallery once every
-// player has submitted a drawing, instead of waiting out the Draw timer.
-func (r *Room) AdvanceToGalleryNow() {
-	r.beginGallery()
-}
-
-// afterGallery is the Gallery timer's target: sabotage needs at least 2
-// submitted drawings to cross-assign, so with fewer than that it skips
-// straight to the next round (or stops, if this was the last one) — an edge
-// case only reachable if a player disconnects mid-round.
-func (r *Room) afterGallery() {
-	r.mu.Lock()
-	numDrawings := len(r.drawings)
-	round, total := r.round, r.totalRounds
-	r.mu.Unlock()
-
-	if numDrawings >= 2 {
-		r.beginSabotage()
+	if len(choices) == 0 {
 		return
 	}
-	if round < total {
-		r.beginDraw()
-	}
+	r.startDrawingWithWord(choices[0])
 }
 
-// beginSabotage computes this round's derangement (who sabotages whose
-// drawing) and forced prompts, then notifies twice: once with the public
-// room:state (phase, timer, round — nothing secret), and once via
-// onEnterSabotage so the app layer can deliver each player's own private
-// SabotageTaskFor(...) directly, never broadcast.
-func (r *Room) beginSabotage() {
+// ChooseWord is the drawer picking one of their 3 offered words.
+func (r *Room) ChooseWord(playerID, word string) error {
 	r.mu.Lock()
-	r.cancelTimerLocked()
-	r.phase = PhaseSabotage
-
-	participantIDs := make([]string, 0, len(r.drawings))
-	for _, id := range r.order {
-		if _, ok := r.drawings[id]; ok {
-			participantIDs = append(participantIDs, id)
-		}
+	if r.phase != PhaseChoosing {
+		r.mu.Unlock()
+		return ErrWrongPhase
 	}
-	r.sabotageAssignments = derangedAssignment(participantIDs)
-	r.sabotagePrompts = make(map[string]string, len(participantIDs))
-	for _, id := range participantIDs {
-		r.sabotagePrompts[id] = pickSabotagePrompt()
+	if playerID != r.currentDrawerIDLocked() {
+		r.mu.Unlock()
+		return ErrNotYourTurn
 	}
-	r.sabotagedDrawings = make(map[string]Drawing)
-
-	r.phaseEndsAt = time.Now().Add(sabotageDuration)
-	r.timer = time.AfterFunc(sabotageDuration, r.afterSabotage)
-	r.mu.Unlock()
-
-	r.fireNotify()
-	r.fireEnterSabotage()
-}
-
-// afterSabotage is the Sabotage timer's target: every round now has a Guess
-// phase, regardless of round number.
-func (r *Room) afterSabotage() {
-	r.beginGuess()
-}
-
-// AdvanceFromSabotageNow lets the app layer skip ahead once every assigned
-// saboteur has submitted, instead of waiting out the Sabotage timer.
-func (r *Room) AdvanceFromSabotageNow() {
-	r.afterSabotage()
-}
-
-// SabotageTaskFor reports what playerID has been assigned to sabotage this
-// round, if anything — the original drawing to edit and the forced prompt.
-// Never exposed any other way; this is the one place that private data is
-// readable, deliberately gated by playerID so the app layer can't leak it.
-func (r *Room) SabotageTaskFor(playerID string) (SabotageTask, bool) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	for originalArtistID, saboteurID := range r.sabotageAssignments {
-		if saboteurID != playerID {
-			continue
-		}
-		d := r.drawings[originalArtistID]
-		return SabotageTask{
-			TargetArtistID: originalArtistID,
-			TargetNickname: d.Nickname,
-			OriginalImage:  d.ImageDataURL,
-			Prompt:         r.sabotagePrompts[originalArtistID],
-		}, true
-	}
-	return SabotageTask{}, false
-}
-
-// SubmitSabotage records playerID's edited drawing for whichever original
-// they were assigned. allSubmitted tells the caller whether every assigned
-// saboteur has now submitted, so it can trigger an early advance.
-func (r *Room) SubmitSabotage(playerID, imageDataURL string) (allSubmitted bool, err error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	if r.phase != PhaseSabotage {
-		return false, ErrWrongPhase
-	}
-
-	var targetArtistID string
-	found := false
-	for originalArtistID, saboteurID := range r.sabotageAssignments {
-		if saboteurID == playerID {
-			targetArtistID = originalArtistID
-			found = true
+	valid := false
+	for _, w := range r.wordChoices {
+		if w == word {
+			valid = true
 			break
 		}
 	}
-	if !found {
-		return false, ErrNotASaboteur
+	r.mu.Unlock()
+	if !valid {
+		return ErrInvalidWordChoice
 	}
+
+	r.startDrawingWithWord(word)
+	return nil
+}
+
+func (r *Room) startDrawingWithWord(word string) {
+	r.mu.Lock()
+	r.cancelTimerLocked()
+	r.phase = PhaseDrawing
+	r.word = word
+	r.phaseEndsAt = time.Now().Add(drawTurnDuration)
+	r.timer = time.AfterFunc(drawTurnDuration, r.endTurn)
+	r.mu.Unlock()
+
+	r.fireNotify()
+	r.fireEnterDrawing()
+}
+
+// GuessOutcome is what TrySubmitGuess found — Attempted tells the caller
+// whether this message was even evaluated as a guess (false for chat sent
+// by the drawer, outside the Drawing phase, or by someone who's already
+// guessed correctly this turn — those are just normal chat).
+type GuessOutcome struct {
+	Attempted  bool
+	Correct    bool
+	AllGuessed bool
+}
+
+// TrySubmitGuess checks text against the secret word. A correct guess is
+// scored immediately and announced as a system chat message right here
+// (while still holding the lock, alongside the score mutation) — the
+// caller just needs to broadcast the resulting state afterward. An
+// incorrect guess is left for the caller to add as ordinary chat (visible
+// to everyone, same as Skribbl shows wrong guesses).
+func (r *Room) TrySubmitGuess(playerID, text string) GuessOutcome {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if r.phase != PhaseDrawing || playerID == r.currentDrawerIDLocked() || r.correctGuessers[playerID] {
+		return GuessOutcome{}
+	}
+
+	if normalizeGuess(text) != normalizeGuess(r.word) {
+		return GuessOutcome{Attempted: true}
+	}
+
+	r.correctGuessers[playerID] = true
+	r.guessOrder = append(r.guessOrder, playerID)
 
 	nickname := "unknown"
 	if p, ok := r.players[playerID]; ok {
 		nickname = p.Nickname
 	}
-	r.sabotagedDrawings[targetArtistID] = Drawing{ArtistID: playerID, Nickname: nickname, ImageDataURL: imageDataURL}
-	return len(r.sabotagedDrawings) >= len(r.sabotageAssignments), nil
+	r.addSystemMessageLocked(fmt.Sprintf("%s guessed the word!", nickname))
+
+	position := len(r.guessOrder)
+	r.scores[playerID] += guessPointsForPosition(position)
+	r.scores[r.currentDrawerIDLocked()] += pointsForDrawerPerGuesser
+
+	eligible := len(r.turnOrder) - 1 // everyone except the drawer
+	allGuessed := eligible > 0 && len(r.correctGuessers) >= eligible
+
+	return GuessOutcome{Attempted: true, Correct: true, AllGuessed: allGuessed}
 }
 
-// beginGuess always runs the full guessDuration — unlike Draw/Sabotage,
-// there's no natural "everyone's done" signal for open-ended voting +
-// discussion, so this phase is purely timer-driven.
-func (r *Room) beginGuess() {
+func normalizeGuess(s string) string {
+	return strings.TrimSpace(strings.ToLower(s))
+}
+
+func guessPointsForPosition(position int) int {
+	switch position {
+	case 1:
+		return pointsForFirstGuess
+	case 2:
+		return pointsForSecondGuess
+	default:
+		return pointsForLaterGuess
+	}
+}
+
+// endTurn is the Drawing timer's target, and is also called directly for
+// an early advance once everyone's guessed — same function either way.
+func (r *Room) endTurn() {
 	r.mu.Lock()
-	r.cancelTimerLocked()
-	r.phase = PhaseGuess
-	r.votes = make(map[string]map[string]string)
-	r.phaseEndsAt = time.Now().Add(guessDuration)
-	r.timer = time.AfterFunc(guessDuration, r.beginReveal)
+	word := r.word
+	r.turnsCompleted++
+	done := r.turnsCompleted >= r.totalTurns
+	r.addSystemMessageLocked(fmt.Sprintf(`Time's up! The word was "%s".`, word))
 	r.mu.Unlock()
 
-	r.fireNotify()
+	if done {
+		r.beginScoreboard()
+	} else {
+		r.beginChoosing()
+	}
 }
 
-// SubmitVote records voterID's accusation for one sabotaged drawing. A
-// player may vote on as many targets as they want, and re-voting on the
-// same target overwrites their earlier guess.
-func (r *Room) SubmitVote(voterID, targetArtistID, suspectID string) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	if r.phase != PhaseGuess {
-		return ErrWrongPhase
-	}
-	if _, ok := r.sabotagedDrawings[targetArtistID]; !ok {
-		return ErrNoSuchTarget
-	}
-	if _, ok := r.players[suspectID]; !ok {
-		return ErrNoSuchPlayer
-	}
-	if r.votes[targetArtistID] == nil {
-		r.votes[targetArtistID] = make(map[string]string)
-	}
-	r.votes[targetArtistID][voterID] = suspectID
-	return nil
+// AdvanceTurnEarly lets the app layer end a turn immediately once every
+// eligible guesser has guessed correctly, instead of waiting out the timer.
+func (r *Room) AdvanceTurnEarly() {
+	r.endTurn()
 }
 
-// beginReveal scores the round and computes the public RevealResult for
-// every sabotaged drawing once, up front — State() just returns the cached
-// slice for as long as the phase stays Reveal, rather than recomputing it
-// (and re-mutating scores!) on every call.
-func (r *Room) beginReveal() {
-	r.mu.Lock()
-	r.cancelTimerLocked()
-	r.phase = PhaseReveal
-
-	results := make([]RevealResult, 0, len(r.sabotagedDrawings))
-	for targetID, sabotaged := range r.sabotagedDrawings {
-		actualSaboteurID := r.sabotageAssignments[targetID]
-		saboteurNickname := "unknown"
-		if p, ok := r.players[actualSaboteurID]; ok {
-			saboteurNickname = p.Nickname
-		}
-		original := r.drawings[targetID]
-
-		// Initialized non-nil so it marshals as [] rather than JSON null when
-		// nobody guessed correctly — a client-side .length on null would
-		// throw.
-		correctGuessers := []string{}
-		totalVotes := 0
-		for voterID, suspectID := range r.votes[targetID] {
-			totalVotes++
-			if suspectID == actualSaboteurID {
-				correctGuessers = append(correctGuessers, voterID)
-				r.scores[voterID] += pointsForCorrectGuess
-			}
-		}
-		caught := totalVotes > 0 && len(correctGuessers)*2 > totalVotes
-		if caught {
-			r.scores[actualSaboteurID] += pointsForSaboteurCaught
-		} else {
-			r.scores[actualSaboteurID] += pointsForSaboteurEscaped
-		}
-
-		results = append(results, RevealResult{
-			TargetArtistID:        targetID,
-			TargetNickname:        original.Nickname,
-			OriginalImageDataURL:  original.ImageDataURL,
-			SabotagedImageDataURL: sabotaged.ImageDataURL,
-			Prompt:                r.sabotagePrompts[targetID],
-			SaboteurID:            actualSaboteurID,
-			SaboteurNickname:      saboteurNickname,
-			CorrectGuesserIDs:     correctGuessers,
-			SaboteurCaught:        caught,
-		})
-	}
-	sortRevealResultsByJoinOrder(results, r.order)
-	r.revealResults = results
-
-	r.phaseEndsAt = time.Now().Add(revealDuration)
-	r.timer = time.AfterFunc(revealDuration, r.afterReveal)
-	r.mu.Unlock()
-
-	r.fireNotify()
-}
-
-func sortRevealResultsByJoinOrder(results []RevealResult, order []string) {
-	rank := make(map[string]int, len(order))
-	for i, id := range order {
-		rank[id] = i
-	}
-	sort.Slice(results, func(i, j int) bool {
-		return rank[results[i].TargetArtistID] < rank[results[j].TargetArtistID]
-	})
-}
-
-// afterReveal is the Reveal timer's target: on to the next round's Draw, or
-// the Scoreboard if that was the last one.
-func (r *Room) afterReveal() {
-	r.mu.Lock()
-	round, total := r.round, r.totalRounds
-	r.mu.Unlock()
-	if round < total {
-		r.beginDraw()
-		return
-	}
-	r.beginScoreboard()
-}
-
-// beginScoreboard is the end of a game — no timer, it just waits for the
-// host to call PlayAgain.
 func (r *Room) beginScoreboard() {
 	r.mu.Lock()
 	r.cancelTimerLocked()
@@ -525,8 +444,8 @@ func (r *Room) beginScoreboard() {
 }
 
 // PlayAgain resets a finished game back to Lobby — same room, same
-// players, scores and round cleared — so the host can Start a fresh game
-// without everyone re-joining. Only valid from Scoreboard, host-only.
+// players, scores and turn order cleared — so the host can Start a fresh
+// game without everyone re-joining. Only valid from Scoreboard, host-only.
 func (r *Room) PlayAgain(requesterID string) error {
 	r.mu.Lock()
 	if requesterID != r.hostID {
@@ -540,39 +459,19 @@ func (r *Room) PlayAgain(requesterID string) error {
 
 	r.cancelTimerLocked()
 	r.phase = PhaseLobby
-	r.round = 0
-	r.totalRounds = 0
+	r.turnOrder = nil
+	r.turnsCompleted = 0
+	r.totalTurns = 0
 	r.word = ""
-	r.drawings = make(map[string]Drawing)
-	r.sabotageAssignments = nil
-	r.sabotagePrompts = nil
-	r.sabotagedDrawings = nil
-	r.votes = nil
-	r.revealResults = nil
+	r.wordChoices = nil
+	r.correctGuessers = nil
+	r.guessOrder = nil
 	r.scores = make(map[string]int, len(r.players))
 	r.phaseEndsAt = time.Time{}
 	r.mu.Unlock()
 
 	r.fireNotify()
 	return nil
-}
-
-// SubmitDrawing records a player's finished drawing for the current round.
-// allSubmitted tells the caller whether every current player has now
-// submitted, so it can trigger an early Gallery advance.
-func (r *Room) SubmitDrawing(playerID, imageDataURL string) (allSubmitted bool, err error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	if r.phase != PhaseDraw {
-		return false, ErrWrongPhase
-	}
-	p, ok := r.players[playerID]
-	if !ok {
-		return false, ErrNotInRoom
-	}
-	r.drawings[playerID] = Drawing{ArtistID: playerID, Nickname: p.Nickname, ImageDataURL: imageDataURL}
-	return len(r.drawings) >= len(r.players), nil
 }
 
 func (r *Room) State() State {
@@ -588,13 +487,10 @@ func (r *Room) State() State {
 	chat := make([]ChatMessage, len(r.chat))
 	copy(chat, r.chat)
 
-	var drawings []Drawing
-	if r.phase == PhaseGallery || r.phase == PhaseSabotage {
-		drawings = make([]Drawing, 0, len(r.order))
-		for _, id := range r.order {
-			if d, ok := r.drawings[id]; ok {
-				drawings = append(drawings, d)
-			}
+	scores := make([]PlayerScore, 0, len(r.order))
+	for _, id := range r.order {
+		if p, ok := r.players[id]; ok {
+			scores = append(scores, PlayerScore{PlayerID: id, Nickname: p.Nickname, Score: r.scores[id]})
 		}
 	}
 
@@ -603,54 +499,28 @@ func (r *Room) State() State {
 		phaseEndsAtMillis = r.phaseEndsAt.UnixMilli()
 	}
 
-	submittedCount := len(r.drawings)
-	if r.phase == PhaseSabotage {
-		submittedCount = len(r.sabotagedDrawings)
+	round, totalRounds := 0, 0
+	if n := len(r.turnOrder); n > 0 {
+		round = r.turnsCompleted/n + 1
+		totalRounds = r.totalTurns / n
 	}
 
-	var guessTargets []GuessTarget
-	if r.phase == PhaseGuess {
-		guessTargets = make([]GuessTarget, 0, len(r.sabotagedDrawings))
-		for _, id := range r.order {
-			sabotaged, ok := r.sabotagedDrawings[id]
-			if !ok {
-				continue
-			}
-			guessTargets = append(guessTargets, GuessTarget{
-				TargetArtistID: id,
-				TargetNickname: r.drawings[id].Nickname,
-				ImageDataURL:   sabotaged.ImageDataURL,
-				Prompt:         r.sabotagePrompts[id],
-			})
-		}
-	}
-
-	var reveal []RevealResult
-	if r.phase == PhaseReveal {
-		reveal = r.revealResults
-	}
-
-	scores := make([]PlayerScore, 0, len(r.order))
-	for _, id := range r.order {
-		if p, ok := r.players[id]; ok {
-			scores = append(scores, PlayerScore{PlayerID: id, Nickname: p.Nickname, Score: r.scores[id]})
-		}
+	wordLength := 0
+	if r.phase == PhaseDrawing {
+		wordLength = len([]rune(r.word))
 	}
 
 	return State{
-		Code:           r.Code,
-		HostID:         r.hostID,
-		Phase:          r.phase,
-		Round:          r.round,
-		TotalRounds:    r.totalRounds,
-		PhaseEndsAt:    phaseEndsAtMillis,
-		Word:           r.word,
-		Players:        players,
-		Chat:           chat,
-		Drawings:       drawings,
-		SubmittedCount: submittedCount,
-		GuessTargets:   guessTargets,
-		Reveal:         reveal,
-		Scores:         scores,
+		Code:        r.Code,
+		HostID:      r.hostID,
+		Phase:       r.phase,
+		Round:       round,
+		TotalRounds: totalRounds,
+		PhaseEndsAt: phaseEndsAtMillis,
+		DrawerID:    r.currentDrawerIDLocked(),
+		WordLength:  wordLength,
+		Players:     players,
+		Chat:        chat,
+		Scores:      scores,
 	}
 }

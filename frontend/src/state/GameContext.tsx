@@ -3,21 +3,23 @@ import type { ReactNode } from 'react';
 import { socket } from '@/lib/socket';
 import type { ConnectionStatus } from '@/lib/socket';
 import {
-  TYPE_CHAT_MESSAGE,
+  TYPE_CANVAS_CLEAR,
   TYPE_CHAT_SEND,
-  TYPE_DRAW_SUBMIT,
   TYPE_ERROR,
   TYPE_ROOM_CREATE,
   TYPE_ROOM_JOIN,
   TYPE_ROOM_PLAY_AGAIN,
   TYPE_ROOM_START,
   TYPE_ROOM_STATE,
-  TYPE_SABOTAGE_ASSIGNMENT,
-  TYPE_SABOTAGE_SUBMIT,
   TYPE_SELF_INFO,
-  TYPE_GUESS_VOTE,
+  TYPE_STROKE_END,
+  TYPE_STROKE_POINT,
+  TYPE_STROKE_START,
+  TYPE_WORD_CHOICES,
+  TYPE_WORD_CHOOSE,
+  TYPE_YOUR_WORD,
 } from '@/lib/types';
-import type { ChatMessage, ErrorPayload, RoomState, SabotageTask } from '@/lib/types';
+import type { ErrorPayload, RoomState, StrokePoint, StrokeStart, WordChoices, YourWord } from '@/lib/types';
 
 interface SelfInfo {
   playerId: string;
@@ -28,18 +30,24 @@ interface GameContextValue {
   status: ConnectionStatus;
   room: RoomState | null;
   self: SelfInfo | null;
-  sabotageTask: SabotageTask | null;
+  wordChoices: string[] | null;
+  yourWord: string | null;
   lastError: ErrorPayload | null;
   clearError: () => void;
   createRoom: (nickname: string) => void;
   joinRoom: (code: string, nickname: string) => void;
   startGame: () => void;
   playAgain: () => void;
-  submitDrawing: (imageDataUrl: string) => void;
-  submitSabotage: (imageDataUrl: string) => void;
-  submitVote: (targetArtistId: string, suspectId: string) => void;
+  chooseWord: (word: string) => void;
   sendChat: (text: string) => void;
   isHost: boolean;
+  isDrawer: boolean;
+  // Sent only when isDrawer is true — the backend silently ignores these
+  // from anyone else, but there's no reason to even try.
+  sendStrokeStart: (s: StrokeStart) => void;
+  sendStrokePoint: (p: StrokePoint) => void;
+  sendStrokeEnd: () => void;
+  sendCanvasClear: () => void;
 }
 
 const GameContext = createContext<GameContextValue | null>(null);
@@ -48,16 +56,15 @@ export function GameProvider({ children }: { children: ReactNode }) {
   const [status, setStatus] = useState<ConnectionStatus>('closed');
   const [room, setRoom] = useState<RoomState | null>(null);
   const [self, setSelf] = useState<SelfInfo | null>(null);
-  const [sabotageTask, setSabotageTask] = useState<SabotageTask | null>(null);
+  const [wordChoices, setWordChoices] = useState<string[] | null>(null);
+  const [yourWord, setYourWord] = useState<string | null>(null);
   const [lastError, setLastError] = useState<ErrorPayload | null>(null);
   const connected = useRef(false);
 
-  // The assignment is only valid for the round it arrived in — clear it the
-  // moment the room leaves Sabotage (whether that's this player advancing
-  // into the next round's Draw or anything else), so a stale task never
-  // lingers into a phase it doesn't belong to.
+  // Both are only valid for the turn they arrived in.
   useEffect(() => {
-    if (room?.phase !== 'sabotage') setSabotageTask(null);
+    if (room?.phase !== 'choosing') setWordChoices(null);
+    if (room?.phase !== 'drawing') setYourWord(null);
   }, [room?.phase]);
 
   useEffect(() => {
@@ -69,42 +76,42 @@ export function GameProvider({ children }: { children: ReactNode }) {
     const offStatus = socket.onStatusChange(setStatus);
     const offState = socket.on<RoomState>(TYPE_ROOM_STATE, setRoom);
     const offSelf = socket.on<SelfInfo>(TYPE_SELF_INFO, setSelf);
-    const offSabotageTask = socket.on<SabotageTask>(TYPE_SABOTAGE_ASSIGNMENT, setSabotageTask);
-    const offChat = socket.on<ChatMessage>(TYPE_CHAT_MESSAGE, (msg) => {
-      // room:state already carries the full chat log on every broadcast, so
-      // this listener exists for future features (toast/sound on message)
-      // rather than to build the log itself — avoids maintaining chat
-      // history in two places that could drift apart.
-      void msg;
-    });
+    const offChoices = socket.on<WordChoices>(TYPE_WORD_CHOICES, (p) => setWordChoices(p.choices));
+    const offYourWord = socket.on<YourWord>(TYPE_YOUR_WORD, (p) => setYourWord(p.word));
     const offError = socket.on<ErrorPayload>(TYPE_ERROR, setLastError);
 
     return () => {
       offStatus();
       offState();
       offSelf();
-      offSabotageTask();
-      offChat();
+      offChoices();
+      offYourWord();
       offError();
     };
   }, []);
+
+  const isDrawer = !!(room && self && room.drawerId === self.playerId);
 
   const value: GameContextValue = {
     status,
     room,
     self,
-    sabotageTask,
+    wordChoices,
+    yourWord,
     lastError,
     clearError: () => setLastError(null),
     createRoom: (nickname) => socket.send(TYPE_ROOM_CREATE, { nickname }),
     joinRoom: (code, nickname) => socket.send(TYPE_ROOM_JOIN, { code, nickname }),
     startGame: () => socket.send(TYPE_ROOM_START, {}),
     playAgain: () => socket.send(TYPE_ROOM_PLAY_AGAIN, {}),
-    submitDrawing: (imageDataUrl) => socket.send(TYPE_DRAW_SUBMIT, { imageDataUrl }),
-    submitSabotage: (imageDataUrl) => socket.send(TYPE_SABOTAGE_SUBMIT, { imageDataUrl }),
-    submitVote: (targetArtistId, suspectId) => socket.send(TYPE_GUESS_VOTE, { targetArtistId, suspectId }),
+    chooseWord: (word) => socket.send(TYPE_WORD_CHOOSE, { word }),
     sendChat: (text) => socket.send(TYPE_CHAT_SEND, { text }),
     isHost: !!(room && self && room.hostId === self.playerId),
+    isDrawer,
+    sendStrokeStart: (s) => socket.send(TYPE_STROKE_START, s),
+    sendStrokePoint: (p) => socket.send(TYPE_STROKE_POINT, p),
+    sendStrokeEnd: () => socket.send(TYPE_STROKE_END, {}),
+    sendCanvasClear: () => socket.send(TYPE_CANVAS_CLEAR, {}),
   };
 
   return <GameContext.Provider value={value}>{children}</GameContext.Provider>;
