@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: sketchsabotage
+    runtime: go
+    plan: free
+    buildCommand: |
+      cd frontend && npm install && npm run build && cd ..
+      rm -rf backend/internal/staticfiles/dist
+      cp -r frontend/dist backend/internal/staticfiles/dist
+      cd backend && go build -o server ./cmd/server
+    startCommand: ./backend/server
+    healthCheckPath: /health

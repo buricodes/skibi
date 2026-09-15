@@ -1,0 +1,17 @@
+# Node
+node_modules/
+frontend/dist/
+
+# Go build artifacts
+backend/server
+backend/sketchsabotage-server*
+
+# The frontend build gets copied here at deploy/build time (see
+# render.yaml and BUILD_PLAN.md §6) — only the placeholder index.html
+# should ever be committed for this path.
+backend/internal/staticfiles/dist/assets/
+backend/internal/staticfiles/dist/favicon.svg
+backend/internal/staticfiles/dist/icons.svg
+
+# OS
+.DS_Store
