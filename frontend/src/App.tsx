@@ -2,7 +2,6 @@ import { GameProvider, useGame } from '@/state/GameContext';
 import { Backdrop } from '@/components/Backdrop';
 import { Home } from '@/screens/Home';
 import { Lobby } from '@/screens/Lobby';
-import { Choosing } from '@/screens/Choosing';
 import { Draw } from '@/screens/Draw';
 import { Scoreboard } from '@/screens/Scoreboard';
 
@@ -13,8 +12,10 @@ function Router() {
   switch (room.phase) {
     case 'lobby':
       return <Lobby />;
+    // Choosing and Drawing share one screen — the word picker/waiting
+    // message appears right where the canvas will be, in the same layout,
+    // rather than a separate full-screen interstitial (see screens/Draw.tsx).
     case 'choosing':
-      return <Choosing />;
     case 'drawing':
       return <Draw />;
     case 'scoreboard':
