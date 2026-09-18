@@ -5,8 +5,9 @@ type Phase string
 
 const (
 	PhaseLobby      Phase = "lobby"
-	PhaseChoosing   Phase = "choosing"   // current drawer is picking a word
-	PhaseDrawing    Phase = "drawing"    // live round: drawer draws, others guess
+	PhaseChoosing   Phase = "choosing" // current drawer is picking a word
+	PhaseDrawing    Phase = "drawing"  // live round: drawer draws, others guess
+	PhaseTurnEnd    Phase = "turnEnd"
 	PhaseScoreboard Phase = "scoreboard" // game over
 )
 
@@ -14,6 +15,7 @@ type Player struct {
 	ID        string `json:"id"`
 	Nickname  string `json:"nickname"`
 	Connected bool   `json:"connected"`
+	Ready     bool   `json:"ready"`
 }
 
 // ChatMessage is either a real player message (SenderID/Nickname set) or a
@@ -54,8 +56,12 @@ type State struct {
 	DrawerID string `json:"drawerId,omitempty"`
 	// WordLength is the guessers' only hint about the secret word (e.g. 7
 	// for "penguin") — 0 outside the Drawing phase.
-	WordLength int           `json:"wordLength,omitempty"`
-	Players    []Player      `json:"players"`
-	Chat       []ChatMessage `json:"chat"`
-	Scores     []PlayerScore `json:"scores"`
+	WordLength   int           `json:"wordLength,omitempty"`
+	RevealedWord string        `json:"revealedWord,omitempty"`
+	LastWord     string        `json:"lastWord,omitempty"`
+	LastDrawerID string        `json:"lastDrawerId,omitempty"`
+	TurnGains    []PlayerScore `json:"turnGains,omitempty"`
+	Players      []Player      `json:"players"`
+	Chat         []ChatMessage `json:"chat"`
+	Scores       []PlayerScore `json:"scores"`
 }

@@ -2,14 +2,27 @@ import { createContext, useContext, useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import { socket } from '@/lib/socket';
 import type { ConnectionStatus } from '@/lib/socket';
-import { playCorrectGuess, playGameOver, playTurnEnd, playYourTurn } from '@/lib/sounds';
+import {
+  playCorrectGuess,
+  playGameOver,
+  playGameStart,
+  playPlayerJoined,
+  playPlayerLeft,
+  playRoomCreated,
+  playRoomJoined,
+  playTurnEnd,
+  playYourTurn,
+} from '@/lib/sounds';
 import {
   TYPE_CANVAS_CLEAR,
+  TYPE_CHAT_MESSAGE,
   TYPE_CHAT_SEND,
   TYPE_ERROR,
+  TYPE_PLAYER_READY,
   TYPE_ROOM_CREATE,
   TYPE_ROOM_JOIN,
   TYPE_ROOM_PLAY_AGAIN,
+  TYPE_ROOM_REJOIN,
   TYPE_ROOM_START,
   TYPE_ROOM_STATE,
   TYPE_SELF_INFO,
@@ -20,7 +33,10 @@ import {
   TYPE_WORD_CHOOSE,
   TYPE_YOUR_WORD,
 } from '@/lib/types';
-import type { ErrorPayload, RoomState, StrokePoint, StrokeStart, WordChoices, YourWord } from '@/lib/types';
+import type { ChatMessage, ErrorPayload, RoomState, StrokePoint, StrokeStart, WordChoices, YourWord } from '@/lib/types';
+import { loadStoredNickname, loadStoredSession, saveStoredSession } from '@/lib/storage';
+
+const ROOM_PATH_RE = /^\/room\/([A-Za-z0-9]{5})\/?$/i;
 
 interface SelfInfo {
   playerId: string;
@@ -31,6 +47,7 @@ interface GameContextValue {
   status: ConnectionStatus;
   room: RoomState | null;
   self: SelfInfo | null;
+  reconnecting: boolean;
   wordChoices: string[] | null;
   yourWord: string | null;
   lastError: ErrorPayload | null;
@@ -39,6 +56,7 @@ interface GameContextValue {
   joinRoom: (code: string, nickname: string) => void;
   startGame: () => void;
   playAgain: () => void;
+  toggleReady: () => void;
   chooseWord: (word: string) => void;
   sendChat: (text: string) => void;
   isHost: boolean;
@@ -62,6 +80,16 @@ export function GameProvider({ children }: { children: ReactNode }) {
   const [lastError, setLastError] = useState<ErrorPayload | null>(null);
   const connected = useRef(false);
 
+  const rememberedSessionRef = useRef<{ code: string; playerId: string } | null>(null);
+  const [reconnecting, setReconnecting] = useState(() => {
+    const match = window.location.pathname.match(ROOM_PATH_RE);
+    if (!match) return false;
+    const session = loadStoredSession();
+    if (!session || session.code.toUpperCase() !== match[1].toUpperCase()) return false;
+    rememberedSessionRef.current = session;
+    return true;
+  });
+
   // Both are only valid for the turn they arrived in.
   useEffect(() => {
     if (room?.phase !== 'choosing') setWordChoices(null);
@@ -83,8 +111,36 @@ export function GameProvider({ children }: { children: ReactNode }) {
     if (room?.phase === 'scoreboard' && prevPhaseRef.current !== 'scoreboard') {
       playGameOver();
     }
+    if (prevPhaseRef.current === 'lobby' && room?.phase && room.phase !== 'lobby') {
+      playGameStart();
+    }
     prevPhaseRef.current = room?.phase;
   }, [room?.phase]);
+
+  const selfAnnouncedRef = useRef(false);
+  useEffect(() => {
+    if (selfAnnouncedRef.current || !self || !room) return;
+    selfAnnouncedRef.current = true;
+    if (room.hostId === self.playerId) playRoomCreated();
+    else playRoomJoined();
+  }, [self, room]);
+
+  const prevLobbyPlayersRef = useRef<Map<string, boolean> | null>(null);
+  useEffect(() => {
+    if (!room || room.phase !== 'lobby') {
+      prevLobbyPlayersRef.current = null;
+      return;
+    }
+    const prev = prevLobbyPlayersRef.current;
+    const next = new Map(room.players.map((p) => [p.id, p.connected]));
+    if (prev) {
+      for (const [id, connectedNow] of next) {
+        if (!prev.has(id)) playPlayerJoined();
+        else if (prev.get(id) && !connectedNow) playPlayerLeft();
+      }
+    }
+    prevLobbyPlayersRef.current = next;
+  }, [room?.players, room?.phase]);
 
   // Chat carries both real messages and system announcements (see
   // ChatMessage.system) — new system entries drive the correct-guess/
@@ -119,14 +175,26 @@ export function GameProvider({ children }: { children: ReactNode }) {
 
     const offStatus = socket.onStatusChange(setStatus);
     const offState = socket.on<RoomState>(TYPE_ROOM_STATE, setRoom);
-    const offSelf = socket.on<SelfInfo>(TYPE_SELF_INFO, setSelf);
+    const offChat = socket.on<ChatMessage>(TYPE_CHAT_MESSAGE, (m) =>
+      setRoom((r) => (r ? { ...r, chat: [...r.chat, m] } : r)),
+    );
+    const offSelf = socket.on<SelfInfo>(TYPE_SELF_INFO, (info) => {
+      setSelf(info);
+      setReconnecting(false);
+      saveStoredSession({ code: info.roomCode, playerId: info.playerId });
+      window.history.replaceState({}, '', `/room/${info.roomCode}`);
+    });
     const offChoices = socket.on<WordChoices>(TYPE_WORD_CHOICES, (p) => setWordChoices(p.choices));
     const offYourWord = socket.on<YourWord>(TYPE_YOUR_WORD, (p) => setYourWord(p.word));
-    const offError = socket.on<ErrorPayload>(TYPE_ERROR, setLastError);
+    const offError = socket.on<ErrorPayload>(TYPE_ERROR, (e) => {
+      setLastError(e);
+      setReconnecting(false);
+    });
 
     return () => {
       offStatus();
       offState();
+      offChat();
       offSelf();
       offChoices();
       offYourWord();
@@ -134,12 +202,25 @@ export function GameProvider({ children }: { children: ReactNode }) {
     };
   }, []);
 
+  const rejoinSentRef = useRef(false);
+  useEffect(() => {
+    if (rejoinSentRef.current || status !== 'open' || !rememberedSessionRef.current) return;
+    const nickname = loadStoredNickname();
+    if (!nickname) {
+      setReconnecting(false);
+      return;
+    }
+    rejoinSentRef.current = true;
+    socket.send(TYPE_ROOM_REJOIN, { ...rememberedSessionRef.current, nickname });
+  }, [status]);
+
   const isDrawer = !!(room && self && room.drawerId === self.playerId);
 
   const value: GameContextValue = {
     status,
     room,
     self,
+    reconnecting,
     wordChoices,
     yourWord,
     lastError,
@@ -148,6 +229,7 @@ export function GameProvider({ children }: { children: ReactNode }) {
     joinRoom: (code, nickname) => socket.send(TYPE_ROOM_JOIN, { code, nickname }),
     startGame: () => socket.send(TYPE_ROOM_START, {}),
     playAgain: () => socket.send(TYPE_ROOM_PLAY_AGAIN, {}),
+    toggleReady: () => socket.send(TYPE_PLAYER_READY, {}),
     chooseWord: (word) => socket.send(TYPE_WORD_CHOOSE, { word }),
     sendChat: (text) => socket.send(TYPE_CHAT_SEND, { text }),
     isHost: !!(room && self && room.hostId === self.playerId),

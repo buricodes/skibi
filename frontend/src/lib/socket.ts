@@ -33,10 +33,6 @@ class GameSocket {
     ws.addEventListener('close', () => {
       this.setStatus('closed');
       this.ws = null;
-      // A dropped connection loses this client's room membership server-side
-      // (see app.go's HandleDisconnect), so on reconnect the app goes back
-      // to Home rather than silently resuming — acceptable for a 2-day demo
-      // (PRD.md §9 "Reconnection" flags fuller resume as future work).
       if (this.shouldReconnect) setTimeout(() => this.open(), RECONNECT_DELAY_MS);
     });
     ws.addEventListener('error', () => {

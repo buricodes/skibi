@@ -115,3 +115,41 @@ export function playGameOver() {
 export function playTick() {
   play([{ freq: 1000, at: 0, dur: 0.05, type: 'square', gain: 0.07 }]);
 }
+
+export function playRoomCreated() {
+  play([
+    { freq: 1174.66, at: 0, dur: 0.22 },
+    { freq: 1567.98, at: 0, dur: 0.3 },
+  ]);
+}
+
+export function playRoomJoined() {
+  play([
+    { freq: 349.23, at: 0, dur: 0.12, type: 'triangle' },
+    { freq: 440, at: 0.08, dur: 0.12, type: 'triangle' },
+    { freq: 523.25, at: 0.16, dur: 0.18, type: 'triangle' },
+  ]);
+}
+
+export function playPlayerJoined() {
+  play([
+    { freq: 660, at: 0, dur: 0.06, gain: 0.1 },
+    { freq: 880, at: 0.05, dur: 0.08, gain: 0.1 },
+  ]);
+}
+
+export function playPlayerLeft() {
+  play([
+    { freq: 880, at: 0, dur: 0.06, gain: 0.1 },
+    { freq: 660, at: 0.05, dur: 0.08, gain: 0.1 },
+  ]);
+}
+
+export function playGameStart() {
+  play([
+    { freq: 392, at: 0, dur: 0.16, type: 'square', gain: 0.12 },
+    { freq: 392, at: 0, dur: 0.22, type: 'sine' },
+    { freq: 587.33, at: 0.1, dur: 0.16, type: 'square', gain: 0.12 },
+    { freq: 587.33, at: 0.1, dur: 0.24, type: 'sine' },
+  ]);
+}

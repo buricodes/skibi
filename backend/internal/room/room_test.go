@@ -1,6 +1,7 @@
 package room
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -69,8 +70,15 @@ func TestFullGameRotatesTurnsAndReachesScoreboard(t *testing.T) {
 			t.Fatalf("turn %d: with only one eligible guesser, a correct guess should mean everyone's guessed", turn)
 		}
 		r.AdvanceTurnEarly()
+		if r.phase != PhaseTurnEnd {
+			t.Fatalf("turn %d: expected turnEnd phase after AdvanceTurnEarly, got %s", turn, r.phase)
+		}
 	}
 
+	// The last iteration's AdvanceTurnEarly() left the room in TurnEnd
+	// (bypassing its real 6s timer, same as drawDuration is bypassed
+	// above) — finishTurnEnd is what that timer would have called.
+	r.finishTurnEnd(true)
 	if r.phase != PhaseScoreboard {
 		t.Fatalf("after all 4 turns, expected scoreboard, got %s", r.phase)
 	}
@@ -149,5 +157,188 @@ func TestChooseWordRejectsWrongPlayerAndInvalidWord(t *testing.T) {
 	}
 	if err := r.ChooseWord(drawerID, "not-a-real-choice"); err != ErrInvalidWordChoice {
 		t.Fatalf("expected ErrInvalidWordChoice, got %v", err)
+	}
+}
+
+func TestApplyRevealMasksWordProgressively(t *testing.T) {
+	r := newRoom("TEST4", "p1")
+	r.addPlayerLocked("p1", "Alice")
+	r.addPlayerLocked("p2", "Bob")
+	r.turnOrder = []string{"p1", "p2"}
+	r.totalTurns = 2
+	r.scores = make(map[string]int)
+	// Long enough that this test's manual applyReveal calls, not the real
+	// scheduled timers, are what drive the assertions below.
+	r.drawDuration = time.Hour
+
+	r.beginChoosing()
+	drawerID, choices := r.CurrentWordChoices()
+	word := choices[0]
+	if err := r.ChooseWord(drawerID, word); err != nil {
+		t.Fatal(err)
+	}
+	runes := []rune(word)
+
+	state := r.State()
+	if state.RevealedWord != strings.Repeat("_", len(runes)) {
+		t.Fatalf("expected fully masked word before any reveal, got %q", state.RevealedWord)
+	}
+
+	countRevealed := func(revealedWord string) int {
+		n := 0
+		for i, ch := range []rune(revealedWord) {
+			if ch == '_' {
+				continue
+			}
+			if ch != runes[i] {
+				t.Fatalf("revealed position %d shows %q, want %q", i, ch, runes[i])
+			}
+			n++
+		}
+		return n
+	}
+
+	r.applyReveal(r.turnsCompleted, 1)
+	if n := countRevealed(r.State().RevealedWord); n != 1 {
+		t.Fatalf("expected exactly 1 letter revealed, got %d", n)
+	}
+
+	// A stale turn token (as if a timer from an already-ended turn fired
+	// late) must be a no-op.
+	r.applyReveal(r.turnsCompleted+1, 2)
+	if n := countRevealed(r.State().RevealedWord); n != 1 {
+		t.Fatalf("expected stale reveal to be ignored, still want 1 revealed, got %d", n)
+	}
+
+	r.applyReveal(r.turnsCompleted, 2)
+	if n := countRevealed(r.State().RevealedWord); n != 2 {
+		t.Fatalf("expected exactly 2 letters revealed, got %d", n)
+	}
+}
+
+func TestToggleReadyOnlyInLobby(t *testing.T) {
+	r := newRoom("TEST5", "p1")
+	r.addPlayerLocked("p1", "Alice")
+
+	if !r.players["p1"].Ready {
+		t.Fatalf("expected a new player to default ready=true")
+	}
+	r.ToggleReady("p1")
+	if r.players["p1"].Ready {
+		t.Fatalf("expected ready to flip to false")
+	}
+	r.ToggleReady("p1")
+	if !r.players["p1"].Ready {
+		t.Fatalf("expected ready to flip back to true")
+	}
+
+	r.turnOrder = []string{"p1"}
+	r.totalTurns = 1
+	r.scores = make(map[string]int)
+	r.drawDuration = time.Hour
+	r.beginChoosing()
+
+	r.ToggleReady("p1")
+	if !r.players["p1"].Ready {
+		t.Fatalf("expected ToggleReady to no-op outside Lobby")
+	}
+}
+
+func TestEndTurnPopulatesLastWordAndTurnGains(t *testing.T) {
+	r := newRoom("TEST6", "p1")
+	r.addPlayerLocked("p1", "Alice")
+	r.addPlayerLocked("p2", "Bob")
+	r.turnOrder = []string{"p1", "p2"}
+	r.totalTurns = 2
+	r.scores = make(map[string]int)
+	r.drawDuration = time.Hour
+
+	r.beginChoosing()
+	drawerID, choices := r.CurrentWordChoices()
+	word := choices[0]
+	if err := r.ChooseWord(drawerID, word); err != nil {
+		t.Fatal(err)
+	}
+	guesserID := "p2"
+	if drawerID == "p2" {
+		guesserID = "p1"
+	}
+	if outcome := r.TrySubmitGuess(guesserID, word); !outcome.Correct {
+		t.Fatalf("expected a correct guess, got %+v", outcome)
+	}
+
+	r.AdvanceTurnEarly()
+	if r.phase != PhaseTurnEnd {
+		t.Fatalf("expected turnEnd phase, got %s", r.phase)
+	}
+
+	state := r.State()
+	if state.LastWord != word {
+		t.Fatalf("expected lastWord %q, got %q", word, state.LastWord)
+	}
+	if state.LastDrawerID != drawerID {
+		t.Fatalf("expected lastDrawerId %q (the turn that just ended), got %q — note DrawerID itself has already moved to the next turn", drawerID, state.LastDrawerID)
+	}
+	gains := map[string]int{}
+	for _, g := range state.TurnGains {
+		gains[g.PlayerID] = g.Score
+	}
+	if gains[guesserID] != pointsForFirstGuess {
+		t.Fatalf("expected guesser to gain %d, got %d", pointsForFirstGuess, gains[guesserID])
+	}
+	if gains[drawerID] != pointsForDrawerPerGuesser {
+		t.Fatalf("expected drawer to gain %d, got %d", pointsForDrawerPerGuesser, gains[drawerID])
+	}
+
+	// Once the recap's over, LastWord/TurnGains must stop being public.
+	r.finishTurnEnd(false)
+	if r.phase != PhaseChoosing {
+		t.Fatalf("expected choosing phase, got %s", r.phase)
+	}
+	state = r.State()
+	if state.LastWord != "" || state.TurnGains != nil {
+		t.Fatalf("expected lastWord/turnGains cleared outside TurnEnd, got %q %+v", state.LastWord, state.TurnGains)
+	}
+}
+
+func TestRejoinReactivatesExistingPlayerOrFallsBack(t *testing.T) {
+	r := newRoom("TEST7", "p1")
+	firstEpoch := r.addPlayerLocked("p1", "Alice")
+
+	// A page refresh: the browser remembers "p1", disconnects the old
+	// connection, and reconnects with a new one before the old one's
+	// disconnect has actually been processed server-side.
+	if _, ok := r.players["p1"]; !ok || !r.players["p1"].Connected {
+		t.Fatalf("sanity: p1 should exist and start connected")
+	}
+	newEpoch, ok := r.Rejoin("p1")
+	if !ok {
+		t.Fatalf("expected Rejoin to find existing player p1")
+	}
+	if newEpoch == firstEpoch {
+		t.Fatalf("expected a fresh epoch on rejoin, got the same one: %d", newEpoch)
+	}
+	if !r.players["p1"].Connected {
+		t.Fatalf("expected p1 to be connected after Rejoin")
+	}
+
+	// The stale old connection's disconnect (carrying the OLD epoch)
+	// arrives after the rejoin — it must not mark the reconnected player
+	// disconnected.
+	r.SetConnected("p1", false, firstEpoch)
+	if !r.players["p1"].Connected {
+		t.Fatalf("a stale disconnect (old epoch) must not affect the newer connection")
+	}
+
+	// A disconnect carrying the CURRENT epoch, though, must still work.
+	r.SetConnected("p1", false, newEpoch)
+	if r.players["p1"].Connected {
+		t.Fatalf("a disconnect matching the current epoch should apply")
+	}
+
+	// Rejoin for an id that was never in this room at all falls back —
+	// the caller (app.go) is expected to AddPlayer in that case.
+	if _, ok := r.Rejoin("never-here"); ok {
+		t.Fatalf("expected Rejoin to report false for an unknown player id")
 	}
 }

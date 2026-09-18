@@ -1,5 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Doodle } from '@/components/Doodle';
+import { HelpToggle } from '@/components/HelpToggle';
+import { loadStoredNickname, saveStoredNickname } from '@/lib/storage';
 import { unlockAudio } from '@/lib/sounds';
 import { useGame } from '@/state/GameContext';
 
@@ -53,17 +55,6 @@ function StepCard({
   );
 }
 
-const NICKNAME_STORAGE_KEY = 'sketchsabotage:nickname';
-
-function loadStoredNickname(): string {
-  try {
-    return localStorage.getItem(NICKNAME_STORAGE_KEY) ?? '';
-  } catch {
-    // Private browsing / storage disabled — just start blank, not fatal.
-    return '';
-  }
-}
-
 export function Home() {
   const { status, createRoom, joinRoom, lastError, clearError } = useGame();
   // Remembered from last time, but still just the input's starting value —
@@ -74,24 +65,21 @@ export function Home() {
 
   function updateNickname(value: string) {
     setNickname(value);
-    try {
-      localStorage.setItem(NICKNAME_STORAGE_KEY, value);
-    } catch {
-      // Same as above — persistence is a nice-to-have, not required to play.
-    }
+    saveStoredNickname(value);
   }
 
-  // A Lobby invite link is `<origin>?code=XXXXX` — jump straight to the
-  // Join form with the code prefilled instead of making someone type a
-  // 5-character code by hand.
   useEffect(() => {
     const url = new URL(window.location.href);
-    const invited = url.searchParams.get('code');
+    const fromQuery = url.searchParams.get('code');
+    const fromPath = url.pathname.match(/^\/room\/([A-Za-z0-9]{5})\/?$/)?.[1];
+    const invited = fromQuery ?? fromPath;
     if (invited) {
       setCode(invited.toUpperCase());
       setMode('join');
-      url.searchParams.delete('code');
-      window.history.replaceState({}, '', url);
+      if (fromQuery) {
+        url.searchParams.delete('code');
+        window.history.replaceState({}, '', url);
+      }
     }
   }, []);
 
@@ -114,6 +102,9 @@ export function Home() {
 
   return (
     <div className="relative z-1 mx-auto max-w-[1240px] px-6 py-6">
+      <div className="flex justify-end pb-3">
+        <HelpToggle />
+      </div>
       <div className="relative overflow-hidden rounded-[22px] bg-[#0a0f2e] px-9 pb-10 pt-9">
         <div className="relative grid grid-cols-1 items-center gap-8 lg:grid-cols-[minmax(300px,1fr)_minmax(0,470px)]">
           <div className="min-w-0">

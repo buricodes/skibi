@@ -3,6 +3,7 @@ package room
 import (
 	"errors"
 	"fmt"
+	"math/rand/v2"
 	"strings"
 	"sync"
 	"time"
@@ -19,7 +20,8 @@ const (
 	totalRoundsDefault = 3 // one "round" = every player draws once
 	wordChoicesCount   = 3
 
-	chooseDuration = 10 * time.Second
+	chooseDuration  = 10 * time.Second
+	turnEndDuration = 6 * time.Second
 
 	// A full game (all rounds, all players) targets roughly this long —
 	// see computeDrawDuration. More players means more turns, so each
@@ -75,6 +77,15 @@ type Room struct {
 	correctGuessers map[string]bool
 	guessOrder      []string
 
+	revealOrder  []int
+	revealCount  int
+	revealTimers []*time.Timer
+
+	turnStartScores map[string]int
+	lastWord        string
+	lastDrawerID    string
+	turnGains       map[string]int
+
 	phaseEndsAt time.Time
 	timer       *time.Timer
 
@@ -91,14 +102,17 @@ type Room struct {
 	// then the confirmed word) — never broadcast, since they're secret.
 	onEnterChoosing func()
 	onEnterDrawing  func()
+
+	connEpoch map[string]int
 }
 
 func newRoom(code, hostID string) *Room {
 	return &Room{
-		Code:    code,
-		hostID:  hostID,
-		phase:   PhaseLobby,
-		players: make(map[string]*Player),
+		Code:      code,
+		hostID:    hostID,
+		phase:     PhaseLobby,
+		players:   make(map[string]*Player),
+		connEpoch: make(map[string]int),
 	}
 }
 
@@ -147,34 +161,57 @@ func (r *Room) fireEnterDrawing() {
 	}
 }
 
-// addPlayerLocked assumes the caller already holds r.mu.
-func (r *Room) addPlayerLocked(id, nickname string) {
-	r.players[id] = &Player{ID: id, Nickname: nickname, Connected: true}
+func (r *Room) addPlayerLocked(id, nickname string) int {
+	r.players[id] = &Player{ID: id, Nickname: nickname, Connected: true, Ready: true}
 	r.order = append(r.order, id)
+	r.connEpoch[id]++
+	return r.connEpoch[id]
 }
 
-func (r *Room) AddPlayer(id, nickname string) error {
+func (r *Room) AddPlayer(id, nickname string) (int, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	if _, exists := r.players[id]; exists {
-		return ErrAlreadyInRoom
+		return 0, ErrAlreadyInRoom
 	}
 	if len(r.players) >= maxPlayers {
-		return ErrRoomFull
+		return 0, ErrRoomFull
 	}
-	r.addPlayerLocked(id, nickname)
-	return nil
+	return r.addPlayerLocked(id, nickname), nil
 }
 
-// SetConnected marks a player connected/disconnected without removing them
-// from the room — a flaky phone shouldn't wreck a live game for everyone
-// else.
-func (r *Room) SetConnected(id string, connected bool) {
+func (r *Room) Rejoin(id string) (int, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	p, ok := r.players[id]
+	if !ok {
+		return 0, false
+	}
+	p.Connected = true
+	r.connEpoch[id]++
+	return r.connEpoch[id], true
+}
+
+func (r *Room) SetConnected(id string, connected bool, epoch int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.connEpoch[id] != epoch {
+		return
+	}
 	if p, ok := r.players[id]; ok {
 		p.Connected = connected
+	}
+}
+
+func (r *Room) ToggleReady(playerID string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.phase != PhaseLobby {
+		return
+	}
+	if p, ok := r.players[playerID]; ok {
+		p.Ready = !p.Ready
 	}
 }
 
@@ -268,6 +305,10 @@ func (r *Room) cancelTimerLocked() {
 		r.timer.Stop()
 		r.timer = nil
 	}
+	for _, t := range r.revealTimers {
+		t.Stop()
+	}
+	r.revealTimers = nil
 }
 
 // currentDrawerIDLocked assumes the caller holds r.mu.
@@ -308,6 +349,11 @@ func (r *Room) beginChoosing() {
 	r.correctGuessers = make(map[string]bool)
 	r.guessOrder = nil
 	r.wordChoices = pickWordChoices(wordChoicesCount)
+	r.lastWord = ""
+	r.lastDrawerID = ""
+	r.turnGains = nil
+	r.revealCount = 0
+	r.revealOrder = nil
 
 	drawerID := r.currentDrawerIDLocked()
 	drawerNickname := "someone"
@@ -368,10 +414,55 @@ func (r *Room) startDrawingWithWord(word string) {
 	r.word = word
 	r.phaseEndsAt = time.Now().Add(r.drawDuration)
 	r.timer = time.AfterFunc(r.drawDuration, r.endTurn)
+
+	r.turnStartScores = make(map[string]int, len(r.scores))
+	for id, s := range r.scores {
+		r.turnStartScores[id] = s
+	}
+
+	runes := []rune(word)
+	order := make([]int, len(runes))
+	for i := range order {
+		order[i] = i
+	}
+	rand.Shuffle(len(order), func(i, j int) { order[i], order[j] = order[j], order[i] })
+	r.revealOrder = order
+	r.revealCount = 0
+
+	turnToken := r.turnsCompleted
+	half := r.drawDuration / 2
+	threeQuarter := r.drawDuration * 3 / 4
+	r.revealTimers = []*time.Timer{
+		time.AfterFunc(half, func() { r.applyReveal(turnToken, 1) }),
+		time.AfterFunc(threeQuarter, func() { r.applyReveal(turnToken, 2) }),
+	}
 	r.mu.Unlock()
 
 	r.fireNotify()
 	r.fireEnterDrawing()
+}
+
+func (r *Room) applyReveal(turnToken, count int) {
+	r.mu.Lock()
+	if r.phase != PhaseDrawing || r.turnsCompleted != turnToken {
+		r.mu.Unlock()
+		return
+	}
+	maxReveal := len(r.revealOrder) - 1
+	if maxReveal < 0 {
+		maxReveal = 0
+	}
+	if count > maxReveal {
+		count = maxReveal
+	}
+	if count <= r.revealCount {
+		r.mu.Unlock()
+		return
+	}
+	r.revealCount = count
+	r.mu.Unlock()
+
+	r.fireNotify()
 }
 
 // GuessOutcome is what TrySubmitGuess found — Attempted tells the caller
@@ -437,27 +528,48 @@ func guessPointsForPosition(position int) int {
 	}
 }
 
-// endTurn is the Drawing timer's target, and is also called directly for
-// an early advance once everyone's guessed — same function either way.
 func (r *Room) endTurn() {
 	r.mu.Lock()
 	word := r.word
+	r.lastDrawerID = r.currentDrawerIDLocked()
 	r.turnsCompleted++
 	done := r.turnsCompleted >= r.totalTurns
 	r.addSystemMessageLocked(fmt.Sprintf(`Time's up! The word was "%s".`, word))
+
+	r.lastWord = word
+	gains := make(map[string]int, len(r.scores))
+	for id, cur := range r.scores {
+		gains[id] = cur - r.turnStartScores[id]
+	}
+	r.turnGains = gains
 	r.mu.Unlock()
 
-	if done {
-		r.beginScoreboard()
-	} else {
-		r.beginChoosing()
-	}
+	r.beginTurnEnd(done)
 }
 
 // AdvanceTurnEarly lets the app layer end a turn immediately once every
 // eligible guesser has guessed correctly, instead of waiting out the timer.
 func (r *Room) AdvanceTurnEarly() {
 	r.endTurn()
+}
+
+func (r *Room) beginTurnEnd(lastTurn bool) {
+	r.mu.Lock()
+	r.cancelTimerLocked()
+	r.phase = PhaseTurnEnd
+	r.phaseEndsAt = time.Now().Add(turnEndDuration)
+	r.timer = time.AfterFunc(turnEndDuration, func() { r.finishTurnEnd(lastTurn) })
+	r.mu.Unlock()
+
+	r.fireNotify()
+}
+
+func (r *Room) finishTurnEnd(lastTurn bool) {
+	if lastTurn {
+		r.beginScoreboard()
+	} else {
+		r.beginChoosing()
+	}
 }
 
 func (r *Room) beginScoreboard() {
@@ -534,21 +646,54 @@ func (r *Room) State() State {
 	}
 
 	wordLength := 0
+	revealedWord := ""
 	if r.phase == PhaseDrawing {
-		wordLength = len([]rune(r.word))
+		runes := []rune(r.word)
+		wordLength = len(runes)
+		revealed := make(map[int]bool, r.revealCount)
+		for i := 0; i < r.revealCount && i < len(r.revealOrder); i++ {
+			revealed[r.revealOrder[i]] = true
+		}
+		cells := make([]rune, len(runes))
+		for i, ch := range runes {
+			if revealed[i] {
+				cells[i] = ch
+			} else {
+				cells[i] = '_'
+			}
+		}
+		revealedWord = string(cells)
+	}
+
+	lastWord := ""
+	lastDrawerID := ""
+	var turnGains []PlayerScore
+	if r.phase == PhaseTurnEnd {
+		lastWord = r.lastWord
+		lastDrawerID = r.lastDrawerID
+		turnGains = make([]PlayerScore, 0, len(r.order))
+		for _, id := range r.order {
+			if p, ok := r.players[id]; ok {
+				turnGains = append(turnGains, PlayerScore{PlayerID: id, Nickname: p.Nickname, Score: r.turnGains[id]})
+			}
+		}
 	}
 
 	return State{
-		Code:        r.Code,
-		HostID:      r.hostID,
-		Phase:       r.phase,
-		Round:       round,
-		TotalRounds: totalRounds,
-		PhaseEndsAt: phaseEndsAtMillis,
-		DrawerID:    r.currentDrawerIDLocked(),
-		WordLength:  wordLength,
-		Players:     players,
-		Chat:        chat,
-		Scores:      scores,
+		Code:         r.Code,
+		HostID:       r.hostID,
+		Phase:        r.phase,
+		Round:        round,
+		TotalRounds:  totalRounds,
+		PhaseEndsAt:  phaseEndsAtMillis,
+		DrawerID:     r.currentDrawerIDLocked(),
+		WordLength:   wordLength,
+		RevealedWord: revealedWord,
+		LastWord:     lastWord,
+		LastDrawerID: lastDrawerID,
+		TurnGains:    turnGains,
+		Players:      players,
+		Chat:         chat,
+		Scores:       scores,
 	}
 }

@@ -23,6 +23,7 @@ const (
 	// Client -> Server
 	TypeRoomCreate    = "room:create"
 	TypeRoomJoin      = "room:join"
+	TypeRoomRejoin    = "room:rejoin"
 	TypeRoomStart     = "room:start"
 	TypeRoomPlayAgain = "room:playAgain"
 	TypeChatSend      = "chat:send"
@@ -31,6 +32,7 @@ const (
 	TypeStrokePoint   = "stroke:point"
 	TypeStrokeEnd     = "stroke:end"
 	TypeCanvasClear   = "canvas:clear"
+	TypePlayerReady   = "player:ready"
 
 	// Server -> Client (room broadcasts)
 	TypeRoomState   = "room:state"
@@ -56,6 +58,12 @@ type RoomCreatePayload struct {
 
 type RoomJoinPayload struct {
 	Code     string `json:"code"`
+	Nickname string `json:"nickname"`
+}
+
+type RoomRejoinPayload struct {
+	Code     string `json:"code"`
+	PlayerID string `json:"playerId"`
 	Nickname string `json:"nickname"`
 }
 

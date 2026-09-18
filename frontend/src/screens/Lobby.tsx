@@ -1,28 +1,24 @@
 import { useState } from 'react';
-import { QRCodeSVG } from 'qrcode.react';
 import { Chat } from '@/components/Chat';
 import { Face } from '@/components/Face';
+import { HelpToggle } from '@/components/HelpToggle';
 import { playerColor } from '@/lib/playerColor';
 import { useGame } from '@/state/GameContext';
 
 export function Lobby() {
-  const { room, self, isHost, sendChat, startGame } = useGame();
+  const { room, self, isHost, sendChat, startGame, toggleReady } = useGame();
   const [copied, setCopied] = useState(false);
   if (!room) return null;
 
   const canStart = room.players.length >= 2;
-  const inviteUrl = `${window.location.origin}${window.location.pathname}?code=${room.code}`;
+  const roomCode = room.code;
 
-  async function copyInviteLink() {
+  async function copyRoomCode() {
     try {
-      await navigator.clipboard.writeText(inviteUrl);
+      await navigator.clipboard.writeText(roomCode);
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
-    } catch {
-      // Clipboard API needs a secure context (https, or localhost) and can
-      // be blocked by permissions — the QR code and visible link are the
-      // fallback, so this failing silently is fine.
-    }
+    } catch {}
   }
 
   return (
@@ -31,12 +27,7 @@ export function Lobby() {
         <div className="font-display text-2xl font-extrabold">
           Tom<span className="bg-gradient-to-r from-[#c084fc] to-accent bg-clip-text text-transparent">Sheint</span>
         </div>
-        <div className="flex items-center gap-3">
-          <span className="text-sm font-bold text-muted">Room Code</span>
-          <span className="flex items-center gap-2.5 whitespace-nowrap rounded-xl bg-gradient-to-r from-accent to-[#6d3bf5] px-4 py-2 text-[15px] font-extrabold tracking-wide shadow-[0_0_22px_rgba(139,92,246,0.45)]">
-            {room.code}
-          </span>
-        </div>
+        <HelpToggle />
       </div>
 
       <div className="grid grid-cols-1 items-start gap-5 lg:grid-cols-[minmax(0,1fr)_minmax(0,420px)]">
@@ -81,7 +72,27 @@ export function Lobby() {
                   {isHostRow && (
                     <span className="rounded-lg bg-violet px-2.5 py-1 text-xs font-extrabold">Host</span>
                   )}
-                  <span className="ml-auto flex items-center gap-2">
+                  <span
+                    className="ml-auto flex items-center gap-2"
+                    style={{ cursor: p.id === self?.playerId ? 'pointer' : 'default' }}
+                    onClick={p.id === self?.playerId ? toggleReady : undefined}
+                  >
+                    {p.ready ? (
+                      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#4ade80" strokeWidth="2.2" strokeLinecap="round">
+                        <rect x="9" y="3" width="6" height="11" rx="3" />
+                        <path d="M6 12a6 6 0 0012 0M12 18v3" />
+                      </svg>
+                    ) : (
+                      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#f472b6" strokeWidth="2.2" strokeLinecap="round">
+                        <rect x="9" y="3" width="6" height="11" rx="3" />
+                        <path d="M6 12a6 6 0 0012 0M12 18v3M4 4l16 16" />
+                      </svg>
+                    )}
+                    <span className="text-xs font-extrabold" style={{ color: p.ready ? '#4ade80' : '#f472b6' }}>
+                      {p.ready ? 'Ready' : 'Not Ready'}
+                    </span>
+                  </span>
+                  <span className="flex items-center gap-2">
                     <svg
                       width="18"
                       height="18"
@@ -130,27 +141,17 @@ export function Lobby() {
         </div>
 
         <div className="flex flex-col gap-3">
-          <div className="flex flex-wrap items-center gap-4 rounded-2xl bg-panel p-4 shadow-[0_0_0_1.5px_var(--color-blue),0_0_30px_rgba(56,189,248,0.22)]">
-            <div className="rounded-md bg-white p-2">
-              <QRCodeSVG value={inviteUrl} size={80} marginSize={0} />
+          <div className="flex items-center justify-between gap-4 rounded-2xl bg-panel p-4 shadow-[0_0_0_1.5px_var(--color-blue),0_0_30px_rgba(56,189,248,0.22)]">
+            <div>
+              <p className="text-sm text-muted-2">Room code</p>
+              <p className="font-display text-2xl font-extrabold tracking-widest text-white">{room.code}</p>
             </div>
-            <div className="flex min-w-0 flex-1 flex-col gap-2">
-              <p className="text-sm text-muted-2">Scan to join, or share the link:</p>
-              <div className="flex gap-2">
-                <input
-                  readOnly
-                  value={inviteUrl}
-                  onFocus={(e) => e.currentTarget.select()}
-                  className="min-w-0 flex-1 truncate rounded-lg bg-panel-2 px-2.5 py-1.5 text-sm text-muted-2 outline-none"
-                />
-                <button
-                  onClick={copyInviteLink}
-                  className="shrink-0 rounded-lg bg-accent px-3 py-1.5 text-sm font-bold hover:opacity-90"
-                >
-                  {copied ? 'Copied!' : 'Copy'}
-                </button>
-              </div>
-            </div>
+            <button
+              onClick={copyRoomCode}
+              className="shrink-0 rounded-lg bg-accent px-4 py-2 text-sm font-bold hover:opacity-90"
+            >
+              {copied ? 'Copied!' : 'Copy'}
+            </button>
           </div>
 
           <div className="h-[420px]">

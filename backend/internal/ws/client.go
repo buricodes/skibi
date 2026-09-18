@@ -18,9 +18,10 @@ const (
 // Client wraps one player's WebSocket connection. RoomCode/PlayerID are set
 // once the player creates or joins a room; empty until then.
 type Client struct {
-	ID       string
-	RoomCode string
-	PlayerID string
+	ID        string
+	RoomCode  string
+	PlayerID  string
+	ConnEpoch int
 
 	conn *websocket.Conn
 	send chan []byte

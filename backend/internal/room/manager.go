@@ -21,15 +21,15 @@ func NewManager() *Manager {
 	return &Manager{rooms: make(map[string]*Room)}
 }
 
-func (m *Manager) CreateRoom(hostID, hostNickname string) *Room {
+func (m *Manager) CreateRoom(hostID, hostNickname string) (*Room, int) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	code := m.generateUniqueCodeLocked()
 	r := newRoom(code, hostID)
-	r.addPlayerLocked(hostID, hostNickname)
+	epoch := r.addPlayerLocked(hostID, hostNickname)
 	m.rooms[code] = r
-	return r
+	return r, epoch
 }
 
 func (m *Manager) GetRoom(code string) (*Room, bool) {

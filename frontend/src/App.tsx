@@ -6,18 +6,25 @@ import { Lobby } from '@/screens/Lobby';
 import { Draw } from '@/screens/Draw';
 import { Scoreboard } from '@/screens/Scoreboard';
 
+function Reconnecting() {
+  return (
+    <div className="relative z-1 mx-auto flex max-w-[1240px] flex-col items-center justify-center px-6 py-24 text-center">
+      <div className="font-display text-2xl font-extrabold">Reconnecting to your game…</div>
+      <p className="mt-2 text-sm text-muted">Hang tight, picking up right where you left off.</p>
+    </div>
+  );
+}
+
 function Router() {
-  const { room } = useGame();
-  if (!room) return <Home />;
+  const { room, reconnecting } = useGame();
+  if (!room) return reconnecting ? <Reconnecting /> : <Home />;
 
   switch (room.phase) {
     case 'lobby':
       return <Lobby />;
-    // Choosing and Drawing share one screen — the word picker/waiting
-    // message appears right where the canvas will be, in the same layout,
-    // rather than a separate full-screen interstitial (see screens/Draw.tsx).
     case 'choosing':
     case 'drawing':
+    case 'turnEnd':
       return <Draw />;
     case 'scoreboard':
       return <Scoreboard />;

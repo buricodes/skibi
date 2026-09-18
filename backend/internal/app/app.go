@@ -31,6 +31,8 @@ func (a *App) HandleMessage(c *ws.Client, env ws.Envelope) {
 		a.handleRoomCreate(c, env)
 	case ws.TypeRoomJoin:
 		a.handleRoomJoin(c, env)
+	case ws.TypeRoomRejoin:
+		a.handleRoomRejoin(c, env)
 	case ws.TypeRoomStart:
 		a.handleRoomStart(c, env)
 	case ws.TypeRoomPlayAgain:
@@ -41,6 +43,8 @@ func (a *App) HandleMessage(c *ws.Client, env ws.Envelope) {
 		a.handleWordChoose(c, env)
 	case ws.TypeStrokeStart, ws.TypeStrokePoint, ws.TypeStrokeEnd, ws.TypeCanvasClear:
 		a.handleDrawerRelay(c, env)
+	case ws.TypePlayerReady:
+		a.handlePlayerReady(c, env)
 	default:
 		a.sendError(c, "unknown_type", "unrecognized message type: "+env.Type)
 	}
@@ -55,7 +59,7 @@ func (a *App) HandleDisconnect(c *ws.Client) {
 	if !ok {
 		return
 	}
-	r.SetConnected(c.PlayerID, false)
+	r.SetConnected(c.PlayerID, false, c.ConnEpoch)
 	a.hub.Leave(c.RoomCode, c)
 	a.broadcastState(r)
 	a.manager.RemoveIfEmpty(c.RoomCode)
@@ -68,12 +72,13 @@ func (a *App) handleRoomCreate(c *ws.Client, env ws.Envelope) {
 		return
 	}
 
-	r := a.manager.CreateRoom(c.ID, p.Nickname)
+	r, epoch := a.manager.CreateRoom(c.ID, p.Nickname)
 	r.SetNotifier(func() { a.broadcastState(r) })
 	r.SetOnEnterChoosing(func() { a.sendWordChoices(r) })
 	r.SetOnEnterDrawing(func() { a.sendYourWord(r) })
 	c.RoomCode = r.Code
 	c.PlayerID = c.ID
+	c.ConnEpoch = epoch
 	a.hub.Join(r.Code, c)
 	a.sendSelfInfo(c)
 	a.broadcastState(r)
@@ -91,13 +96,54 @@ func (a *App) handleRoomJoin(c *ws.Client, env ws.Envelope) {
 		a.sendError(c, "room_not_found", "no room with that code")
 		return
 	}
-	if err := r.AddPlayer(c.ID, p.Nickname); err != nil {
+	epoch, err := r.AddPlayer(c.ID, p.Nickname)
+	if err != nil {
 		a.sendError(c, "join_failed", err.Error())
 		return
 	}
 
 	c.RoomCode = r.Code
 	c.PlayerID = c.ID
+	c.ConnEpoch = epoch
+	a.hub.Join(r.Code, c)
+	a.sendSelfInfo(c)
+	a.broadcastState(r)
+}
+
+func (a *App) handleRoomRejoin(c *ws.Client, env ws.Envelope) {
+	var p ws.RoomRejoinPayload
+	if err := json.Unmarshal(env.Payload, &p); err != nil || p.Nickname == "" || p.Code == "" {
+		a.sendError(c, "bad_request", "code and nickname are required")
+		return
+	}
+
+	r, ok := a.manager.GetRoom(p.Code)
+	if !ok {
+		a.sendError(c, "room_not_found", "no room with that code")
+		return
+	}
+
+	if p.PlayerID != "" {
+		if epoch, ok := r.Rejoin(p.PlayerID); ok {
+			c.RoomCode = r.Code
+			c.PlayerID = p.PlayerID
+			c.ConnEpoch = epoch
+			a.hub.Join(r.Code, c)
+			a.sendSelfInfo(c)
+			a.broadcastState(r)
+			a.resendPrivateStateIfDrawer(r, p.PlayerID)
+			return
+		}
+	}
+
+	epoch, err := r.AddPlayer(c.ID, p.Nickname)
+	if err != nil {
+		a.sendError(c, "join_failed", err.Error())
+		return
+	}
+	c.RoomCode = r.Code
+	c.PlayerID = c.ID
+	c.ConnEpoch = epoch
 	a.hub.Join(r.Code, c)
 	a.sendSelfInfo(c)
 	a.broadcastState(r)
@@ -212,6 +258,32 @@ func (a *App) handleChatSend(c *ws.Client, env ws.Envelope) {
 		return
 	}
 	a.hub.Broadcast(r.Code, data)
+}
+
+func (a *App) handlePlayerReady(c *ws.Client, _ ws.Envelope) {
+	if c.RoomCode == "" {
+		a.sendError(c, "not_in_room", "join a room first")
+		return
+	}
+	r, ok := a.manager.GetRoom(c.RoomCode)
+	if !ok {
+		return
+	}
+	r.ToggleReady(c.PlayerID)
+	a.broadcastState(r)
+}
+
+func (a *App) resendPrivateStateIfDrawer(r *room.Room, playerID string) {
+	state := r.State()
+	if state.DrawerID != playerID {
+		return
+	}
+	switch state.Phase {
+	case room.PhaseChoosing:
+		a.sendWordChoices(r)
+	case room.PhaseDrawing:
+		a.sendYourWord(r)
+	}
 }
 
 func (a *App) sendWordChoices(r *room.Room) {

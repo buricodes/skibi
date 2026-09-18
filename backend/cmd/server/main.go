@@ -1,10 +1,12 @@
 package main
 
 import (
+	"errors"
 	"io/fs"
 	"log"
 	"net/http"
 	"os"
+	"strings"
 
 	"github.com/gorilla/websocket"
 
@@ -20,6 +22,20 @@ var upgrader = websocket.Upgrader{
 	// short-lived classroom demo, so any origin is fine — a real deployment
 	// with persistent state would want to lock this down.
 	CheckOrigin: func(r *http.Request) bool { return true },
+}
+
+func spaHandler(fsys fs.FS) http.HandlerFunc {
+	fileServer := http.FileServer(http.FS(fsys))
+	return func(w http.ResponseWriter, r *http.Request) {
+		p := strings.TrimPrefix(r.URL.Path, "/")
+		if p == "" {
+			p = "index.html"
+		}
+		if _, err := fs.Stat(fsys, p); errors.Is(err, fs.ErrNotExist) {
+			r.URL.Path = "/"
+		}
+		fileServer.ServeHTTP(w, r)
+	}
 }
 
 func main() {
@@ -56,7 +72,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("static file setup: %v", err)
 	}
-	mux.Handle("/", http.FileServer(http.FS(distFS)))
+	mux.Handle("/", spaHandler(distFS))
 
 	port := os.Getenv("PORT")
 	if port == "" {

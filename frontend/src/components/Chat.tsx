@@ -51,7 +51,7 @@ export function Chat({
         <div className="font-display text-xl font-extrabold">Chat</div>
       </div>
 
-      <div ref={scrollRef} className="flex-1 space-y-3 overflow-y-auto pr-1">
+      <div ref={scrollRef} className="min-h-0 flex-1 space-y-3 overflow-y-auto pr-1">
         {messages.length === 0 && <p className="text-sm text-muted">No messages yet</p>}
         {messages.map((m) =>
           m.system ? (
