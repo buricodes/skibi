@@ -9,6 +9,16 @@ var wordList = []string{
 	"octopus", "guitar", "volcano", "penguin", "dragon", "sandwich",
 	"unicorn", "tornado", "pirate", "spaceship", "mermaid", "cactus", "ninja",
 	"astronaut", "jellyfish", "lighthouse", "campfire", "skateboard",
+	"mummy", "skeleton", "vampire", "werewolf", "witch", "cauldron",
+	"potion", "genie", "phoenix", "griffin", "minotaur", "sphinx",
+	"pyramid", "scorpion", "camel", "oasis", "mirage", "boomerang",
+	"platypus", "chameleon", "peacock", "toucan", "parrot", "sloth",
+	"porcupine", "hippo", "rhino", "walrus", "narwhal", "seahorse",
+	"starfish", "squid", "stingray", "pretzel", "waffle", "croissant",
+	"lollipop", "marshmallow", "canoe", "kayak", "surfboard", "snorkel",
+	"parachute", "trampoline", "scarecrow", "haystack", "silo", "sled",
+	"icicle", "avalanche", "glacier", "geyser", "cave", "fossil",
+	"meteor", "comet", "satellite", "cyborg", "hologram", "boat",
 }
 
 // pickWordChoices returns n distinct random words for the drawer to choose
